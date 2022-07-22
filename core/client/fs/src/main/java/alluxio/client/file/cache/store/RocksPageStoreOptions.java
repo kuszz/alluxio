@@ -43,7 +43,6 @@ public class RocksPageStoreOptions extends PageStoreOptions {
    * Creates a new instance of {@link RocksPageStoreOptions}.
    */
   public RocksPageStoreOptions() {
-    mRootDir = "";
     mMaxPageSize = Constants.MB;
     mWriteBufferSize = 64 * Constants.MB;
     mMaxBufferPoolSize = 32;

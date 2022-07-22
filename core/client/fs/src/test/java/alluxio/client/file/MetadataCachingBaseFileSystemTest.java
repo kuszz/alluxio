@@ -12,13 +12,14 @@
 package alluxio.client.file;
 
 import static org.junit.Assert.assertEquals;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 import alluxio.AlluxioURI;
 import alluxio.ClientContext;
-import alluxio.ConfigurationTestUtils;
+import alluxio.conf.Configuration;
 import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.status.AlluxioStatusException;
 import alluxio.exception.status.NotFoundException;
@@ -58,7 +59,7 @@ public class MetadataCachingBaseFileSystemTest {
   private static final URIStatus FILE_STATUS =
       new URIStatus(new FileInfo().setPath(FILE.getPath()).setCompleted(true));
 
-  private InstancedConfiguration mConf = ConfigurationTestUtils.defaults();
+  private InstancedConfiguration mConf = Configuration.copyGlobal();
   private FileSystemContext mFileContext;
   private ClientContext mClientContext;
   private RpcCountingFileSystemMasterClient mFileSystemMasterClient;
@@ -67,13 +68,15 @@ public class MetadataCachingBaseFileSystemTest {
 
   @Before
   public void before() throws Exception {
+    // Avoid async update file access time to call getStatus to mess up the test results
+    mConf.set(PropertyKey.USER_UPDATE_FILE_ACCESSTIME_DISABLED, true);
     mClientContext = ClientContext.create(mConf);
     mFileContext = PowerMockito.mock(FileSystemContext.class);
     mFileSystemMasterClient = new RpcCountingFileSystemMasterClient();
     when(mFileContext.acquireMasterClientResource())
         .thenReturn(new CloseableResource<FileSystemMasterClient>(mFileSystemMasterClient) {
           @Override
-          public void close() {
+          public void closeResource() {
             // Noop.
           }
         });
@@ -87,7 +90,7 @@ public class MetadataCachingBaseFileSystemTest {
 
   @After
   public void after() {
-    mConf = ConfigurationTestUtils.defaults();
+    mConf = Configuration.copyGlobal();
   }
 
   @Test
@@ -238,6 +241,39 @@ public class MetadataCachingBaseFileSystemTest {
       // expected exception thrown. test passes
     }
     assertEquals(2, mFileSystemMasterClient.getStatusRpcCount(NOT_EXIST_FILE));
+  }
+
+  @Test
+  public void dropMetadataCacheFile() throws Exception {
+    mFs.getStatus(FILE);
+    assertEquals(1, mFileSystemMasterClient.getStatusRpcCount(FILE));
+    mFs.getStatus(FILE);
+    assertEquals(1, mFileSystemMasterClient.getStatusRpcCount(FILE));
+    mFs.dropMetadataCache(FILE);
+    mFs.getStatus(FILE);
+    assertEquals(2, mFileSystemMasterClient.getStatusRpcCount(FILE));
+  }
+
+  @Test
+  public void dropMetadataCacheDir() throws Exception {
+    mFs.listStatus(DIR);
+    assertEquals(1, mFileSystemMasterClient.listStatusRpcCount(DIR));
+    mFs.dropMetadataCache(DIR);
+    mFs.listStatus(DIR);
+    assertEquals(2, mFileSystemMasterClient.listStatusRpcCount(DIR));
+  }
+
+  @Test
+  public void dropMetadataCacheDirFile() throws Exception {
+    mFs.listStatus(DIR);
+    mFs.getStatus(FILE);
+    assertEquals(1, mFileSystemMasterClient.listStatusRpcCount(DIR));
+    assertEquals(0, mFileSystemMasterClient.getStatusRpcCount(FILE));
+    mFs.dropMetadataCache(FILE);
+    mFs.getStatus(FILE);
+    assertEquals(1, mFileSystemMasterClient.getStatusRpcCount(FILE));
+    mFs.listStatus(DIR);
+    assertEquals(2, mFileSystemMasterClient.listStatusRpcCount(DIR));
   }
 
   class RpcCountingFileSystemMasterClient extends MockFileSystemMasterClient {

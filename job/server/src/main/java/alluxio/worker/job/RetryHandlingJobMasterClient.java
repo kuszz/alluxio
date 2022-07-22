@@ -11,16 +11,17 @@
 
 package alluxio.worker.job;
 
-import alluxio.AbstractMasterClient;
+import alluxio.AbstractJobMasterClient;
 import alluxio.Constants;
+import alluxio.grpc.GrpcUtils;
 import alluxio.grpc.JobCommand;
 import alluxio.grpc.JobHeartbeatPRequest;
 import alluxio.grpc.JobInfo;
 import alluxio.grpc.JobMasterWorkerServiceGrpc;
 import alluxio.grpc.RegisterJobWorkerPRequest;
 import alluxio.grpc.ServiceType;
-import alluxio.grpc.GrpcUtils;
 import alluxio.job.wire.JobWorkerHealth;
+import alluxio.util.CommonUtils;
 import alluxio.wire.WorkerNetAddress;
 
 import org.slf4j.Logger;
@@ -28,7 +29,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -36,7 +36,7 @@ import javax.annotation.concurrent.ThreadSafe;
  * workers.
  */
 @ThreadSafe
-public final class RetryHandlingJobMasterClient extends AbstractMasterClient
+public final class RetryHandlingJobMasterClient extends AbstractJobMasterClient
     implements JobMasterClient {
   private static final Logger RPC_LOG = LoggerFactory.getLogger(JobMasterClient.class);
   private JobMasterWorkerServiceGrpc.JobMasterWorkerServiceBlockingStub mClient = null;
@@ -84,6 +84,7 @@ public final class RetryHandlingJobMasterClient extends AbstractMasterClient
         mClient.heartbeat(JobHeartbeatPRequest.newBuilder()
             .setJobWorkerHealth(jobWorkerHealth.toProto()).addAllTaskInfos(taskInfoList).build())
             .getCommandsList(),
-        RPC_LOG, "Heartbeat", "jobWorkerHealth=%s,taskInfoList=%s", jobWorkerHealth, taskInfoList);
+        RPC_LOG, "Heartbeat", "jobWorkerHealth=%s,taskInfoList=%s", jobWorkerHealth,
+            CommonUtils.summarizeCollection(taskInfoList));
   }
 }

@@ -17,7 +17,7 @@ import alluxio.annotation.PublicApi;
 import alluxio.client.file.cache.CacheManager;
 import alluxio.client.file.cache.LocalCacheFileSystem;
 import alluxio.conf.AlluxioConfiguration;
-import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
 import alluxio.conf.Source;
 import alluxio.exception.AlluxioException;
@@ -49,7 +49,6 @@ import alluxio.grpc.UnmountPOptions;
 import alluxio.security.authorization.AclEntry;
 import alluxio.security.user.UserState;
 import alluxio.util.CommonUtils;
-import alluxio.util.ConfigurationUtils;
 import alluxio.wire.BlockLocationInfo;
 import alluxio.wire.MountPointInfo;
 import alluxio.wire.SyncPointInfo;
@@ -67,7 +66,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
-
 import javax.security.auth.Subject;
 
 /**
@@ -106,15 +104,28 @@ public interface FileSystem extends Closeable {
      * @return a FileSystem from the cache, creating a new one if it doesn't yet exist
      */
     public static FileSystem get(Subject subject) {
-      return get(subject, new InstancedConfiguration(ConfigurationUtils.defaults()));
+      return get(subject, Configuration.global());
     }
 
+    /**
+     * Get a FileSystem from the cache with a given subject.
+     * @param subject The subject to use for security-related client operations
+     * @param conf the Alluxio configuration
+     * @return a FileSystem from the cache, creating a new one if it doesn't yet exist
+     */
     public static FileSystem get(Subject subject, AlluxioConfiguration conf) {
       Preconditions.checkNotNull(subject, "subject");
       // TODO(gpang): should this key use the UserState instead of subject?
       FileSystemCache.Key key =
           new FileSystemCache.Key(UserState.Factory.create(conf, subject).getSubject(), conf);
       return FILESYSTEM_CACHE.get(key);
+    }
+
+    /**
+     * @return a new FileSystem instance
+     */
+    public static FileSystem create() {
+      return create(FileSystemContext.create());
     }
 
     /**
@@ -144,7 +155,7 @@ public interface FileSystem extends Closeable {
         List<PropertyKey> keys = new ArrayList<>(conf.keySet());
         keys.sort(Comparator.comparing(PropertyKey::getName));
         for (PropertyKey key : keys) {
-          String value = conf.getOrDefault(key, null);
+          Object value = conf.getOrDefault(key, null);
           Source source = conf.getSource(key);
           LOG.debug("{}={} ({})", key.getName(), value, source);
         }

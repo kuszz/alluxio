@@ -25,8 +25,8 @@ import static org.mockito.Mockito.when;
 
 import alluxio.AlluxioURI;
 import alluxio.ClientContext;
-import alluxio.ConfigurationTestUtils;
 import alluxio.TestLoggerRule;
+import alluxio.conf.Configuration;
 import alluxio.conf.InstancedConfiguration;
 import alluxio.conf.PropertyKey;
 import alluxio.grpc.Bits;
@@ -68,7 +68,7 @@ public final class BaseFileSystemTest {
   private static final String SHOULD_HAVE_PROPAGATED_MESSAGE =
       "Exception should have been propagated";
 
-  private InstancedConfiguration mConf = ConfigurationTestUtils.defaults();
+  private InstancedConfiguration mConf = Configuration.copyGlobal();
 
   @Rule
   private TestLoggerRule mTestLogger = new TestLoggerRule();
@@ -89,13 +89,14 @@ public final class BaseFileSystemTest {
    */
   @Before
   public void before() {
+    mConf.set(PropertyKey.USER_FILE_INCLUDE_OPERATION_ID, false);
     mClientContext = ClientContext.create(mConf);
     mFileContext = PowerMockito.mock(FileSystemContext.class);
     mFileSystemMasterClient = PowerMockito.mock(FileSystemMasterClient.class);
     when(mFileContext.acquireMasterClientResource()).thenReturn(
         new CloseableResource<FileSystemMasterClient>(mFileSystemMasterClient) {
           @Override
-          public void close() {
+          public void closeResource() {
             // Noop.
           }
         });
@@ -108,7 +109,7 @@ public final class BaseFileSystemTest {
 
   @After
   public void after() {
-    mConf = ConfigurationTestUtils.defaults();
+    mConf = Configuration.copyGlobal();
   }
 
   /**
@@ -551,7 +552,7 @@ public final class BaseFileSystemTest {
   @Test
   public void uriCheckBadAuthority() throws Exception {
     mConf.set(PropertyKey.MASTER_HOSTNAME, "localhost");
-    mConf.set(PropertyKey.MASTER_RPC_PORT, "19998");
+    mConf.set(PropertyKey.MASTER_RPC_PORT, 19998);
 
     assertBadAuthority("localhost:1234", "Should fail on bad host and port");
     assertBadAuthority("zk@localhost:19998", "Should fail on zk authority");
@@ -566,7 +567,7 @@ public final class BaseFileSystemTest {
   @Test
   public void uriCheckBadScheme() throws Exception {
     mConf.set(PropertyKey.MASTER_HOSTNAME, "localhost");
-    mConf.set(PropertyKey.MASTER_RPC_PORT, "19998");
+    mConf.set(PropertyKey.MASTER_RPC_PORT, 19998);
 
     AlluxioURI uri = new AlluxioURI("hdfs://localhost:19998/root");
     try {
@@ -583,7 +584,7 @@ public final class BaseFileSystemTest {
   @Test
   public void uriCheckGoodSchemeAndAuthority() throws Exception {
     mConf.set(PropertyKey.MASTER_HOSTNAME, "localhost");
-    mConf.set(PropertyKey.MASTER_RPC_PORT, "19998");
+    mConf.set(PropertyKey.MASTER_RPC_PORT, 19998);
     before(); // Resets the filesystem and contexts to use proper configuration.
 
     useUriWithAuthority("localhost:19998");
@@ -599,7 +600,7 @@ public final class BaseFileSystemTest {
   @Test
   public void uriCheckNoSchemeAuthority() throws Exception {
     mConf.set(PropertyKey.MASTER_HOSTNAME, "localhost");
-    mConf.set(PropertyKey.MASTER_RPC_PORT, "19998");
+    mConf.set(PropertyKey.MASTER_RPC_PORT, 19998);
 
     AlluxioURI uri = new AlluxioURI("/root");
     mFileSystem.createDirectory(uri);

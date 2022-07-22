@@ -79,6 +79,7 @@ public final class Constants {
   public static final String HEADER_SWIFT = "swift://";
   public static final String HEADER_WASB = "wasb://";
   public static final String HEADER_WASBS = "wasbs://";
+  public static final String HEADER_OBS = "obs://";
 
   public static final int MAX_PORT = 65535;
 
@@ -176,7 +177,6 @@ public final class Constants {
   // S3 northbound API constants
   public static final String S3_DELETE_IN_ALLUXIO_ONLY = "ALLUXIO_ONLY";
   public static final String S3_DELETE_IN_ALLUXIO_AND_UFS = "ALLUXIO_AND_UFS";
-  public static final String S3_MULTIPART_TEMPORARY_DIR_SUFFIX = "_s3_multipart_tmp";
 
   // Ufs fingerprint
   public static final String INVALID_UFS_FINGERPRINT = "";
@@ -204,11 +204,16 @@ public final class Constants {
   // Replication
   public static final int REPLICATION_MAX_INFINITY = -1;
 
+  // Fuse shell
+  public static final String DEAFULT_FUSE_MOUNT = "/mnt/alluxio-fuse";
+  public static final String ALLUXIO_CLI_PATH = "/.alluxiocli";
+
   // Persistence
   // The file should only be persisted after rename operation or persist CLI
   public static final int NO_AUTO_PERSIST = -1;
   public static final int PERSISTENCE_INVALID_JOB_ID = -1;
   public static final String PERSISTENCE_INVALID_UFS_PATH = "";
+  public static final String PERSISTENCE_ASYNC_TEMP_PATH_ROOT_DIR = ".alluxio_ufs_persistence";
 
   // Table service
   public static final String TABLE_MASTER_NAME = "TableMaster";

@@ -22,10 +22,11 @@ import alluxio.AlluxioURI;
 import alluxio.ClientContext;
 import alluxio.Constants;
 import alluxio.SystemOutRule;
+import alluxio.client.WriteType;
 import alluxio.client.file.FileSystem;
 import alluxio.client.meta.RetryHandlingMetaMasterClient;
 import alluxio.conf.PropertyKey;
-import alluxio.conf.ServerConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.grpc.FileSystemMasterCommonPOptions;
 import alluxio.grpc.SetAttributePOptions;
 import alluxio.master.MasterClientContext;
@@ -72,11 +73,10 @@ public class JournalToolTest extends BaseIntegrationTest {
   public LocalAlluxioClusterResource mLocalAlluxioClusterResource =
       new LocalAlluxioClusterResource.Builder()
           .setIncludeSecondary(true)
-          .setProperty(PropertyKey.MASTER_JOURNAL_TYPE, JournalType.UFS.toString())
-          .setProperty(PropertyKey.MASTER_JOURNAL_CHECKPOINT_PERIOD_ENTRIES,
-              Integer.toString(CHECKPOINT_SIZE))
+          .setProperty(PropertyKey.MASTER_JOURNAL_TYPE, JournalType.UFS)
+          .setProperty(PropertyKey.MASTER_JOURNAL_CHECKPOINT_PERIOD_ENTRIES, CHECKPOINT_SIZE)
           .setProperty(PropertyKey.MASTER_JOURNAL_LOG_SIZE_BYTES_MAX, "100")
-          .setProperty(PropertyKey.USER_FILE_WRITE_TYPE_DEFAULT, "MUST_CACHE").build();
+          .setProperty(PropertyKey.USER_FILE_WRITE_TYPE_DEFAULT, WriteType.MUST_CACHE).build();
 
   private File mDumpDir;
   private FileSystem mFs;
@@ -211,7 +211,7 @@ public class JournalToolTest extends BaseIntegrationTest {
 
     // Take snapshot on master.
     new RetryHandlingMetaMasterClient(MasterClientContext
-        .newBuilder(ClientContext.create(ServerConfiguration.global()))
+        .newBuilder(ClientContext.create(Configuration.global()))
         .setMasterInquireClient(new SingleMasterInquireClient(
             mLocalAlluxioClusterResource.get().getLocalAlluxioMaster().getAddress()))
         .build()).checkpoint();

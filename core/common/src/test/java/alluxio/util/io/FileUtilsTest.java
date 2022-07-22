@@ -18,8 +18,8 @@ import static org.junit.Assert.fail;
 import static org.junit.Assume.assumeFalse;
 
 import alluxio.AlluxioURI;
+import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
-import alluxio.util.ConfigurationUtils;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -41,7 +41,6 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-
 import javax.annotation.Nullable;
 
 /**
@@ -49,8 +48,8 @@ import javax.annotation.Nullable;
  */
 public class FileUtilsTest {
 
-  private String mWorkerDataFolderPerms = ConfigurationUtils.defaults()
-      .get(PropertyKey.WORKER_DATA_FOLDER_PERMISSIONS);
+  private String mWorkerDataFolderPerms = Configuration.global()
+      .getString(PropertyKey.WORKER_DATA_FOLDER_PERMISSIONS);
 
   /**
    * The temporary folder.
@@ -227,7 +226,7 @@ public class FileUtilsTest {
   }
 
   /**
-   * Tests the {@link FileUtils#createBlockPath(String)} method.
+   * Tests the {@link FileUtils#createBlockPath} method.
    */
   @Test
   public void createBlockPath() throws IOException {

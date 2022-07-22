@@ -22,7 +22,7 @@ import alluxio.AlluxioURI;
 import alluxio.ConfigurationRule;
 import alluxio.Constants;
 import alluxio.conf.PropertyKey;
-import alluxio.conf.ServerConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.exception.BlockInfoException;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileAlreadyExistsException;
@@ -105,10 +105,10 @@ public final class InodeTreeTest {
 
   @Rule
   public ConfigurationRule mConfigurationRule =
-      new ConfigurationRule(new ImmutableMap.Builder<PropertyKey, String>()
-          .put(PropertyKey.SECURITY_AUTHORIZATION_PERMISSION_ENABLED, "true")
+      new ConfigurationRule(new ImmutableMap.Builder<PropertyKey, Object>()
+          .put(PropertyKey.SECURITY_AUTHORIZATION_PERMISSION_ENABLED, true)
           .put(PropertyKey.SECURITY_AUTHORIZATION_PERMISSION_SUPERGROUP, "test-supergroup")
-          .build(), ServerConfiguration.global());
+          .build(), Configuration.modifiableGlobal());
 
   /**
    * Sets up all dependencies before a test runs.

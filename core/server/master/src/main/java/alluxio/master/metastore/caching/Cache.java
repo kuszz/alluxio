@@ -33,7 +33,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -113,7 +112,11 @@ public abstract class Cache<K, V> implements Closeable {
    * @return the value, or empty if the key doesn't exist in the cache or in the backing store
    */
   public Optional<V> get(K key, ReadOption option) {
-    if (option.shouldSkipCache() || cacheIsFull()) {
+    if (option.shouldSkipCache()) {
+      return getSkipCache(key);
+    }
+    if (cacheIsFull()) {
+      wakeEvictionThreadIfNecessary();
       return getSkipCache(key);
     }
     Entry result = mMap.compute(key, (k, entry) -> {
@@ -259,8 +262,8 @@ public abstract class Cache<K, V> implements Closeable {
     mMap.clear();
   }
 
-  private boolean overHighWaterMark() {
-    return mMap.size() >= mHighWaterMark;
+  private boolean underHighWaterMark() {
+    return mMap.size() < mHighWaterMark;
   }
 
   private boolean cacheIsFull() {
@@ -317,9 +320,9 @@ public abstract class Cache<K, V> implements Closeable {
     public void run() {
       while (!Thread.interrupted()) {
         // Wait for the cache to get over the high water mark.
-        while (!overHighWaterMark()) {
+        while (underHighWaterMark()) {
           synchronized (mEvictionThread) {
-            if (!overHighWaterMark()) {
+            if (underHighWaterMark()) {
               try {
                 mIsSleeping = true;
                 mEvictionThread.wait();

@@ -12,12 +12,10 @@
 package alluxio.master.journal;
 
 import alluxio.grpc.GetQuorumInfoPResponse;
+import alluxio.grpc.GetTransferLeaderMessagePResponse;
 import alluxio.grpc.JournalDomain;
 import alluxio.grpc.NetAddress;
 import alluxio.master.journal.raft.RaftJournalSystem;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
@@ -26,10 +24,8 @@ import java.io.IOException;
  * processes.
  */
 public class DefaultJournalMaster implements JournalMaster {
-  private static final Logger LOG = LoggerFactory.getLogger(DefaultJournalMaster.class);
-
-  private JournalDomain mJournalDomain;
-  private JournalSystem mJournalSystem;
+  private final JournalDomain mJournalDomain;
+  private final JournalSystem mJournalSystem;
 
   /**
    * @param journalDomain domain for the journal
@@ -58,5 +54,25 @@ public class DefaultJournalMaster implements JournalMaster {
   public void removeQuorumServer(NetAddress serverAddress) throws IOException {
     checkQuorumOpSupported();
     ((RaftJournalSystem) mJournalSystem).removeQuorumServer(serverAddress);
+  }
+
+  @Override
+  public String transferLeadership(NetAddress newLeaderAddress) {
+    checkQuorumOpSupported();
+    return ((RaftJournalSystem) mJournalSystem).transferLeadership(newLeaderAddress);
+  }
+
+  @Override
+  public void resetPriorities() throws IOException {
+    checkQuorumOpSupported();
+    ((RaftJournalSystem) mJournalSystem).resetPriorities();
+  }
+
+  @Override
+  public GetTransferLeaderMessagePResponse getTransferLeaderMessage(String transferId) {
+    checkQuorumOpSupported();
+    return GetTransferLeaderMessagePResponse.newBuilder()
+           .setTransMsg(((RaftJournalSystem) mJournalSystem).getTransferLeaderMessage(transferId))
+           .build();
   }
 }

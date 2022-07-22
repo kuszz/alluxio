@@ -11,9 +11,9 @@
 
 package alluxio;
 
+import alluxio.annotation.SuppressFBWarnings;
 import alluxio.conf.PropertyKey;
 import alluxio.exception.ExceptionMessage;
-import alluxio.exception.PreconditionMessage;
 import alluxio.exception.ServiceNotFoundException;
 import alluxio.exception.status.AlluxioStatusException;
 import alluxio.exception.status.FailedPreconditionException;
@@ -31,11 +31,11 @@ import alluxio.metrics.MetricInfo;
 import alluxio.metrics.MetricsSystem;
 import alluxio.retry.RetryPolicy;
 import alluxio.retry.RetryUtils;
+import alluxio.util.CommonUtils;
 import alluxio.util.SecurityUtils;
 
 import com.codahale.metrics.Timer;
 import com.google.common.base.Preconditions;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import org.slf4j.Logger;
@@ -45,7 +45,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.UnresolvedAddressException;
 import java.util.function.Supplier;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -59,15 +58,12 @@ public abstract class AbstractClient implements Client {
 
   protected InetSocketAddress mAddress;
 
-  /** Address to load configuration, which may differ from {@code mAddress}. */
-  protected InetSocketAddress mConfAddress;
-
   /** Underlying channel to the target service. */
   protected GrpcChannel mChannel;
 
   @SuppressFBWarnings(value = "IS2_INCONSISTENT_SYNC",
       justification = "the error seems a bug in findbugs")
-  /** Used to query service version for the remote service type. */
+  /* Used to query service version for the remote service type. */
   protected ServiceVersionClientServiceGrpc.ServiceVersionClientServiceBlockingStub mVersionService;
 
   /** Is true if this client is currently connected. */
@@ -95,10 +91,7 @@ public abstract class AbstractClient implements Client {
    * @param address the address
    */
   public AbstractClient(ClientContext context, InetSocketAddress address) {
-    this(context, address, () -> RetryUtils.defaultClientRetry(
-        context.getClusterConf().getDuration(PropertyKey.USER_RPC_RETRY_MAX_DURATION),
-        context.getClusterConf().getDuration(PropertyKey.USER_RPC_RETRY_BASE_SLEEP_MS),
-        context.getClusterConf().getDuration(PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS)));
+    this(context, address, RetryUtils::defaultClientRetry);
   }
 
   /**
@@ -176,7 +169,7 @@ public abstract class AbstractClient implements Client {
       throws IOException {
     // Bootstrap once for clients
     if (!isConnected()) {
-      mContext.loadConfIfNotLoaded(mConfAddress);
+      mContext.loadConfIfNotLoaded(getConfAddress());
     }
   }
 
@@ -218,7 +211,6 @@ public abstract class AbstractClient implements Client {
       // failover).
       try {
         mAddress = getAddress();
-        mConfAddress = getConfAddress();
       } catch (UnavailableException e) {
         LOG.debug("Failed to determine {} rpc address ({}): {}",
             getServiceName(), retryPolicy.getAttemptCount(), e.toString());
@@ -231,7 +223,6 @@ public abstract class AbstractClient implements Client {
         mChannel = GrpcChannelBuilder
             .newBuilder(GrpcServerAddress.create(mAddress), mContext.getClusterConf())
             .setSubject(mContext.getSubject())
-            .setClientType(getServiceName())
             .build();
         // Create stub for version service on host
         mVersionService = ServiceVersionClientServiceGrpc.newBlockingStub(mChannel);
@@ -247,7 +238,7 @@ public abstract class AbstractClient implements Client {
         lastConnectFailure = e;
         if (e instanceof UnauthenticatedException) {
           // If there has been a failure in opening GrpcChannel, it's possible because
-          // the authentication credential has expired. Relogin.
+          // the authentication credential has expired. Re-login.
           mContext.getUserState().relogin();
         }
         if (e instanceof NotFoundException) {
@@ -287,13 +278,11 @@ public abstract class AbstractClient implements Client {
         lastConnectFailure);
   }
 
-  /**
-   * Closes the connection with the Alluxio remote and does the necessary cleanup. It should be used
-   * if the client has not connected with the remote for a while, for example.
-   */
+  @Override
   public synchronized void disconnect() {
     if (mConnected) {
-      Preconditions.checkNotNull(mChannel, PreconditionMessage.CHANNEL_NULL_WHEN_CONNECTED);
+      Preconditions.checkNotNull(mChannel,
+          "The client channel should never be null when the client is connected");
       LOG.debug("Disconnecting from the {} @ {}", getServiceName(), mAddress);
       beforeDisconnect();
       mChannel.shutdown();
@@ -302,9 +291,7 @@ public abstract class AbstractClient implements Client {
     }
   }
 
-  /**
-   * @return true if this client is connected to the remote
-   */
+  @Override
   public synchronized boolean isConnected() {
     return mConnected;
   }
@@ -326,9 +313,6 @@ public abstract class AbstractClient implements Client {
 
   @Override
   public synchronized InetSocketAddress getConfAddress() throws UnavailableException {
-    if (mConfAddress != null) {
-      return mConfAddress;
-    }
     return mAddress;
   }
 
@@ -357,11 +341,11 @@ public abstract class AbstractClient implements Client {
    * @param <V> type of return value of the RPC call
    * @param rpc the RPC call to be executed
    * @param logger the logger to use for this call
-   * @param rpcName the human readable name of the RPC call
+   * @param rpcName the human-readable name of the RPC call
    * @param description the format string of the description, used for logging
    * @param args the arguments for the description
    * @return the return value of the RPC call
-   * @throws AlluxioStatusException
+   * @throws AlluxioStatusException status exception
    */
   protected synchronized <V> V retryRPC(RpcCallable<V> rpc, Logger logger, String rpcName,
       String description, Object... args) throws AlluxioStatusException {
@@ -384,7 +368,8 @@ public abstract class AbstractClient implements Client {
       logger.debug("Exit (OK): {}({}) in {} ms", rpcName, debugDesc, duration);
       if (duration >= mRpcThreshold) {
         logger.warn("{}({}) returned {} in {} ms (>={} ms)",
-            rpcName, String.format(description, args), ret, duration, mRpcThreshold);
+            rpcName, String.format(description, args),
+            CommonUtils.summarizeCollection(ret), duration, mRpcThreshold);
       }
       return ret;
     } catch (Exception e) {
@@ -394,7 +379,7 @@ public abstract class AbstractClient implements Client {
           rpcName, debugDesc, duration, e.toString());
       if (duration >= mRpcThreshold) {
         logger.warn("{}({}) exits with exception [{}] in {} ms (>={}ms)",
-            rpcName, String.format(description, args), e.toString(), duration, mRpcThreshold);
+            rpcName, String.format(description, args), e, duration, mRpcThreshold);
       }
       throw e;
     }
@@ -421,12 +406,12 @@ public abstract class AbstractClient implements Client {
           throw se;
         }
       }
-      LOG.debug("Rpc failed ({}): {}", retryPolicy.getAttemptCount(), ex.toString());
+      LOG.debug("Rpc failed ({}): ", retryPolicy.getAttemptCount(), ex);
       onRetry.get();
       disconnect();
     }
-    throw new UnavailableException("Failed after " + retryPolicy.getAttemptCount()
-        + " attempts: " + ex.toString(), ex);
+    throw new UnavailableException(String.format("Failed after %d attempts: %s",
+        retryPolicy.getAttemptCount(), ex), ex);
   }
 
   // TODO(calvin): General tag logic should be in getMetricName

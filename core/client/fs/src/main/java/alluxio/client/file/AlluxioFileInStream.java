@@ -14,22 +14,23 @@ package alluxio.client.file;
 import alluxio.AlluxioURI;
 import alluxio.annotation.PublicApi;
 import alluxio.client.ReadType;
-import alluxio.client.block.AlluxioBlockStore;
+import alluxio.client.block.BlockStoreClient;
 import alluxio.client.block.stream.BlockInStream;
 import alluxio.client.block.stream.BlockWorkerClient;
 import alluxio.client.file.options.InStreamOptions;
 import alluxio.conf.AlluxioConfiguration;
 import alluxio.conf.PropertyKey;
 import alluxio.exception.PreconditionMessage;
-import alluxio.grpc.AsyncCacheRequest;
+import alluxio.grpc.CacheRequest;
 import alluxio.resource.CloseableResource;
+import alluxio.retry.ExponentialTimeBoundedRetry;
 import alluxio.retry.RetryPolicy;
-import alluxio.retry.RetryUtils;
 import alluxio.util.CommonUtils;
 import alluxio.wire.BlockInfo;
 import alluxio.wire.BlockLocation;
 import alluxio.wire.WorkerNetAddress;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.io.Closer;
@@ -41,7 +42,6 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
-
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -70,7 +70,7 @@ public class AlluxioFileInStream extends FileInStream {
   private Supplier<RetryPolicy> mRetryPolicySupplier;
   private final URIStatus mStatus;
   private final InStreamOptions mOptions;
-  private final AlluxioBlockStore mBlockStore;
+  private final BlockStoreClient mBlockStore;
   private final FileSystemContext mContext;
   private final boolean mPassiveCachingEnabled;
 
@@ -114,11 +114,15 @@ public class AlluxioFileInStream extends FileInStream {
           conf.getDuration(PropertyKey.USER_BLOCK_READ_RETRY_SLEEP_MIN);
       final Duration blockReadRetrySleepMax =
           conf.getDuration(PropertyKey.USER_BLOCK_READ_RETRY_SLEEP_MAX);
-      mRetryPolicySupplier = () -> RetryUtils.defaultBlockReadRetry(
-          blockReadRetryMaxDuration, blockReadRetrySleepBase, blockReadRetrySleepMax);
+      mRetryPolicySupplier =
+          () -> ExponentialTimeBoundedRetry.builder()
+              .withMaxDuration(blockReadRetryMaxDuration)
+              .withInitialSleep(blockReadRetrySleepBase)
+              .withMaxSleep(blockReadRetrySleepMax)
+              .withSkipInitialSleep().build();
       mStatus = status;
       mOptions = options;
-      mBlockStore = AlluxioBlockStore.create(mContext);
+      mBlockStore = BlockStoreClient.create(mContext);
       mLength = mStatus.getLength();
       mBlockSize = mStatus.getBlockSizeBytes();
       mPosition = 0;
@@ -386,16 +390,20 @@ public class AlluxioFileInStream extends FileInStream {
 
   // Send an async cache request to a worker based on read type and passive cache options.
   // Note that, this is best effort
-  private void triggerAsyncCaching(BlockInStream stream) {
+  @VisibleForTesting
+  boolean triggerAsyncCaching(BlockInStream stream) {
+    final long blockId = stream.getId();
+    final BlockInfo blockInfo = mStatus.getBlockInfo(blockId);
+    if (blockInfo == null) {
+      return false;
+    }
     try {
       boolean cache = ReadType.fromProto(mOptions.getOptions().getReadType()).isCache();
       boolean overReplicated = mStatus.getReplicationMax() > 0
-          && mStatus.getFileBlockInfos().get((int) (getPos() / mBlockSize))
-          .getBlockInfo().getLocations().size() >= mStatus.getReplicationMax();
+          && blockInfo.getLocations().size() >= mStatus.getReplicationMax();
       cache = cache && !overReplicated;
       // Get relevant information from the stream.
       WorkerNetAddress dataSource = stream.getAddress();
-      long blockId = stream.getId();
       if (cache && (mLastBlockIdCached != blockId)) {
         // Construct the async cache request
         long blockLength = mOptions.getBlockInfo(blockId).getLength();
@@ -407,15 +415,15 @@ public class AlluxioFileInStream extends FileInStream {
               dataSource.getContainerHost(), host);
           host = dataSource.getContainerHost();
         }
-        AsyncCacheRequest request =
-            AsyncCacheRequest.newBuilder().setBlockId(blockId).setLength(blockLength)
+        CacheRequest request =
+            CacheRequest.newBuilder().setBlockId(blockId).setLength(blockLength)
                 .setOpenUfsBlockOptions(mOptions.getOpenUfsBlockOptions(blockId))
                 .setSourceHost(host).setSourcePort(dataSource.getDataPort())
-                .build();
+                .setAsync(true).build();
         if (mPassiveCachingEnabled && mContext.hasProcessLocalWorker()) {
-          mContext.getProcessLocalWorker().asyncCache(request);
+          mContext.getProcessLocalWorker().orElseThrow(NullPointerException::new).cache(request);
           mLastBlockIdCached = blockId;
-          return;
+          return true;
         }
         WorkerNetAddress worker;
         if (mPassiveCachingEnabled && mContext.hasNodeLocalWorker()) {
@@ -426,28 +434,31 @@ public class AlluxioFileInStream extends FileInStream {
         }
         try (CloseableResource<BlockWorkerClient> blockWorker =
                  mContext.acquireBlockWorkerClient(worker)) {
-          blockWorker.get().asyncCache(request);
+          blockWorker.get().cache(request);
           mLastBlockIdCached = blockId;
         }
       }
+      return true;
     } catch (Exception e) {
       LOG.warn("Failed to complete async cache request (best effort) for block {} of file {}: {}",
           stream.getId(), mStatus.getPath(), e.toString());
+      return false;
     }
   }
 
   private void handleRetryableException(BlockInStream stream, IOException e) {
     WorkerNetAddress workerAddress = stream.getAddress();
-    LOG.warn("Failed to read block {} of file {} from worker {}, will retry: {}",
-        stream.getId(), mStatus.getPath(), workerAddress, e.getMessage());
+    LOG.warn("Failed to read block {} of file {} from worker {}. "
+        + "This worker will be skipped for future read operations, will retry: {}.",
+        stream.getId(), mStatus.getPath(), workerAddress, e.toString());
     try {
       stream.close();
     } catch (Exception ex) {
       // Do not throw doing a best effort close
       LOG.warn("Failed to close input stream for block {} of file {}: {}",
-          stream.getId(), mStatus.getPath(), ex.getMessage());
+          stream.getId(), mStatus.getPath(), ex.toString());
     }
-
+    // TODO(lu) consider recovering failed workers
     mFailedWorkers.put(workerAddress, System.currentTimeMillis());
   }
 }

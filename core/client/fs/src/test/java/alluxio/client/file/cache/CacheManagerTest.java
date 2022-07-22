@@ -15,8 +15,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 
-import alluxio.ConfigurationTestUtils;
-import alluxio.conf.InstancedConfiguration;
+import alluxio.client.file.cache.store.PageStoreDir;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.Configuration;
 
 import org.junit.Test;
 
@@ -27,7 +28,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 public class CacheManagerTest {
-  private InstancedConfiguration mConf = ConfigurationTestUtils.defaults();
+  private final AlluxioConfiguration mConf = Configuration.global();
 
   @Test
   public void factoryGet() throws Exception {
@@ -61,8 +62,10 @@ public class CacheManagerTest {
 
   @Test
   public void factoryCreate() throws Exception {
-    CacheManager manager = CacheManager.Factory.create(mConf);
-    assertNotEquals(manager, CacheManager.Factory.create(mConf));
+    CacheManager manager = CacheManager.Factory.create(mConf, PageMetaStore.create(mConf),
+        PageStoreDir.createPageStoreDirs(mConf));
+    assertNotEquals(manager, CacheManager.Factory.create(mConf, PageMetaStore.create(mConf),
+        PageStoreDir.createPageStoreDirs(mConf)));
   }
 
   @Test

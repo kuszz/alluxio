@@ -26,7 +26,6 @@ import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.WritableByteChannel;
-
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -56,7 +55,7 @@ public class LocalFileBlockWriter extends BlockWriter {
 
   @Override
   public long append(ByteBuffer inputBuf) throws IOException {
-    long bytesWritten = write(mLocalFileChannel.size(), inputBuf.duplicate());
+    long bytesWritten = write(mLocalFileChannel.size(), inputBuf);
     mPosition += bytesWritten;
     return bytesWritten;
   }

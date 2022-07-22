@@ -11,9 +11,14 @@
 
 package alluxio.web;
 
+import static alluxio.Constants.REST_API_PREFIX;
+
 import alluxio.AlluxioURI;
-import alluxio.conf.ServerConfiguration;
 import alluxio.conf.PropertyKey;
+import alluxio.conf.Configuration;
+import alluxio.metrics.MetricsSystem;
+import alluxio.metrics.sink.MetricsServlet;
+import alluxio.metrics.sink.PrometheusMetricsServlet;
 
 import com.google.common.base.Preconditions;
 import org.eclipse.jetty.security.ConstraintMapping;
@@ -33,7 +38,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -43,6 +47,8 @@ import javax.annotation.concurrent.NotThreadSafe;
 public abstract class WebServer {
   private static final Logger LOG = LoggerFactory.getLogger(WebServer.class);
   private static final String DISABLED_METHODS = "TRACE,OPTIONS";
+  private static final String THREAD_DUMP_PATH = REST_API_PREFIX + "/common/thread_dump";
+  private static final String JMX_PATH = "/metrics/jmx";
 
   private final Server mServer;
   private final String mServiceName;
@@ -50,6 +56,9 @@ public abstract class WebServer {
   private final ServerConnector mServerConnector;
   private final ConstraintSecurityHandler mSecurityHandler;
   protected final ServletContextHandler mServletContextHandler;
+  private final MetricsServlet mMetricsServlet = new MetricsServlet(MetricsSystem.METRIC_REGISTRY);
+  private final PrometheusMetricsServlet mPMetricsServlet = new PrometheusMetricsServlet(
+      MetricsSystem.METRIC_REGISTRY);
 
   /**
    * Creates a new instance of {@link WebServer}. It pairs URLs with servlets and sets the webapp
@@ -66,7 +75,7 @@ public abstract class WebServer {
     mServiceName = serviceName;
 
     QueuedThreadPool threadPool = new QueuedThreadPool();
-    int webThreadCount = ServerConfiguration.getInt(PropertyKey.WEB_THREADS);
+    int webThreadCount = Configuration.getInt(PropertyKey.WEB_THREADS);
 
     // Jetty needs at least (1 + selectors + acceptors) threads.
     threadPool.setMinThreads(webThreadCount * 2 + 1);
@@ -100,10 +109,11 @@ public abstract class WebServer {
     for (String s : DISABLED_METHODS.split(",")) {
       disableMethod(s);
     }
-
-    mServletContextHandler.addServlet(StacksServlet.class, "/stacks");
+    mServletContextHandler.addServlet(StacksServlet.class, THREAD_DUMP_PATH);
+    mServletContextHandler.addServlet(JmxServlet.class, JMX_PATH);
     HandlerList handlers = new HandlerList();
-    handlers.setHandlers(new Handler[] {mServletContextHandler, new DefaultHandler()});
+    handlers.setHandlers(new Handler[] {mMetricsServlet.getHandler(), mPMetricsServlet.getHandler(),
+        mServletContextHandler, new DefaultHandler()});
     mServer.setHandler(handlers);
   }
 

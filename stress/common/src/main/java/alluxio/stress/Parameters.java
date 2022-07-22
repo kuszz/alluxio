@@ -13,7 +13,11 @@ package alluxio.stress;
 
 import alluxio.AlluxioURI;
 import alluxio.collections.Pair;
+import alluxio.util.JsonSerializable;
 
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonTypeInfo.As;
+import com.fasterxml.jackson.annotation.JsonTypeInfo.Id;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.type.MapType;
@@ -35,6 +39,7 @@ import java.util.stream.Collectors;
 /**
  * Abstract class for parameters of stress tests.
  */
+@JsonTypeInfo(use = Id.CLASS, include = As.PROPERTY, property = JsonSerializable.CLASS_NAME_FIELD)
 public abstract class Parameters {
   private static final Logger LOG = LoggerFactory.getLogger(Parameters.class);
 
@@ -125,7 +130,7 @@ public abstract class Parameters {
           if (fieldName.startsWith("m")) {
             fieldName = fieldName.substring(1);
           }
-          description = String.format("%s: %s", fieldName, fieldValue.toString());
+          description = String.format("%s: %s", fieldName, fieldValue);
         }
         descriptions.add(description);
       }
@@ -166,6 +171,15 @@ public abstract class Parameters {
     // TODO(gpang): special handling for map values
 
     return new Pair<>(new ArrayList<>(commonFields), new ArrayList<>(uniqueFields));
+  }
+
+  /**
+   * Notice the function name can't be getOperation since Jackson would transfer this function in to
+   * json value, break Parameter serialization and cause serialization error.
+   * @return the Operation Enum
+   */
+  public Enum<?> operation() {
+    throw new UnsupportedOperationException("operation method is not implemented");
   }
 
   /**

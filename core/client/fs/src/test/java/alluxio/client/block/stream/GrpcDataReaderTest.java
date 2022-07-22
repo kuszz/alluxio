@@ -13,7 +13,7 @@ package alluxio.client.block.stream;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -21,8 +21,8 @@ import static org.mockito.Mockito.verify;
 import static org.powermock.api.mockito.PowerMockito.when;
 
 import alluxio.ClientContext;
-import alluxio.ConfigurationTestUtils;
 import alluxio.client.file.FileSystemContext;
+import alluxio.conf.Configuration;
 import alluxio.grpc.Chunk;
 import alluxio.grpc.ReadRequest;
 import alluxio.grpc.ReadResponse;
@@ -38,11 +38,8 @@ import io.netty.buffer.ByteBuf;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
-import org.powermock.api.mockito.PowerMockito;
-import org.powermock.core.classloader.annotations.PrepareForTest;
-import org.powermock.modules.junit4.PowerMockRunner;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -51,8 +48,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeoutException;
 
-@RunWith(PowerMockRunner.class)
-@PrepareForTest({FileSystemContext.class, WorkerNetAddress.class})
 public final class GrpcDataReaderTest {
   private static final int CHUNK_SIZE = 1024;
   private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4);
@@ -68,11 +63,11 @@ public final class GrpcDataReaderTest {
 
   @Before
   public void before() throws Exception {
-    mContext = PowerMockito.mock(FileSystemContext.class);
+    mContext = Mockito.mock(FileSystemContext.class);
     when(mContext.getClientContext())
-        .thenReturn(ClientContext.create(ConfigurationTestUtils.defaults()));
-    when(mContext.getClusterConf()).thenReturn(ConfigurationTestUtils.defaults());
-    mAddress = mock(WorkerNetAddress.class);
+        .thenReturn(ClientContext.create(Configuration.global()));
+    when(mContext.getClusterConf()).thenReturn(Configuration.global());
+    mAddress = new WorkerNetAddress().setHost("localhost").setDataPort(1234);
     ReadRequest.Builder readRequestBuilder =
         ReadRequest.newBuilder().setBlockId(BLOCK_ID).setChunkSize(CHUNK_SIZE);
     mFactory = new GrpcDataReader.Factory(mContext, mAddress, readRequestBuilder);

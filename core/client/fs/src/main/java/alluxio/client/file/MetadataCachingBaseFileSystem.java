@@ -25,6 +25,8 @@ import alluxio.grpc.DeletePOptions;
 import alluxio.grpc.GetStatusPOptions;
 import alluxio.grpc.ListStatusPOptions;
 import alluxio.grpc.RenamePOptions;
+import alluxio.metrics.MetricKey;
+import alluxio.metrics.MetricsSystem;
 import alluxio.util.FileSystemOptions;
 import alluxio.util.ThreadUtils;
 import alluxio.wire.FileInfo;
@@ -42,7 +44,6 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -78,6 +79,9 @@ public class MetadataCachingBaseFileSystem extends BaseFileSystem {
     // asynchronously update access time.
     mAccessTimeUpdater = new ThreadPoolExecutor(0, masterClientThreads, THREAD_KEEPALIVE_SECOND,
         TimeUnit.SECONDS, new SynchronousQueue<>());
+    MetricsSystem.registerCachedGaugeIfAbsent(
+        MetricsSystem.getMetricName(MetricKey.CLIENT_META_DATA_CACHE_SIZE.getName()),
+        mMetadataCache::size);
   }
 
   @Override
@@ -222,5 +226,67 @@ public class MetadataCachingBaseFileSystem extends BaseFileSystem {
       ThreadUtils.shutdownAndAwaitTermination(mAccessTimeUpdater, THREAD_TERMINATION_TIMEOUT_MS);
       super.close();
     }
+  }
+
+  /**
+   * Best efforts to drops metadata cache of a given uri,
+   * all its ancestors and descendants.
+   *
+   * @param uri the uri need to drop metadata cache
+   */
+  public void dropMetadataCache(AlluxioURI uri) {
+    dropMetadataCacheDescendants(uri.getPath());
+    dropMetadataCacheAncestors(uri);
+  }
+
+  /**
+   * Best efforts to drop metadata cache of a given uri
+   * and all its ancestors.
+   *
+   * @param uri the uri need to drop metadata cache
+   */
+  private void dropMetadataCacheAncestors(AlluxioURI uri) {
+    mMetadataCache.invalidate(uri);
+    LOG.debug("Invalidated metadata cache for path {}", uri);
+    if (!uri.isRoot()) {
+      AlluxioURI parentUri = uri.getParent();
+      if (parentUri != null) {
+        dropMetadataCacheAncestors(parentUri);
+      }
+    }
+  }
+
+  /**
+   * Best efforts to drop metadata cache of a given uri
+   * and all its descendants.
+   *
+   * @param path the path need to drop metadata cache
+   */
+  private void dropMetadataCacheDescendants(String path) {
+    List<URIStatus> children = mMetadataCache.listStatus(path);
+    if (children != null) {
+      for (URIStatus child : children) {
+        dropMetadataCacheDescendants(child.getPath());
+      }
+    }
+    mMetadataCache.invalidate(path);
+    LOG.debug("Invalidated metadata cache for path {}", path);
+  }
+
+  /**
+   * Drop all metadata cache.
+   */
+  public void dropMetadataCacheAll() {
+    if (mMetadataCache.size() > 0) {
+      mMetadataCache.invalidateAll();
+      LOG.debug("Invalidated all metadata cache");
+    }
+  }
+
+  /**
+   * @return metadata cache size
+   */
+  public long getMetadataCacheSize() {
+    return mMetadataCache.size();
   }
 }

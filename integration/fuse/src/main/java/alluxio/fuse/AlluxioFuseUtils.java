@@ -12,34 +12,47 @@
 package alluxio.fuse;
 
 import alluxio.AlluxioURI;
+import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
-import alluxio.conf.InstancedConfiguration;
+import alluxio.client.file.FileSystemContext;
+import alluxio.client.file.URIStatus;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
 import alluxio.exception.AccessControlException;
 import alluxio.exception.AlluxioException;
-import alluxio.exception.BlockDoesNotExistException;
+import alluxio.exception.BlockDoesNotExistRuntimeException;
 import alluxio.exception.ConnectionFailedException;
 import alluxio.exception.DirectoryNotEmptyException;
 import alluxio.exception.FileAlreadyCompletedException;
 import alluxio.exception.FileAlreadyExistsException;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.InvalidPathException;
+import alluxio.fuse.auth.AuthPolicy;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.grpc.SetAttributePOptions;
+import alluxio.jnifuse.utils.Environment;
+import alluxio.jnifuse.utils.VersionPreference;
+import alluxio.metrics.MetricKey;
 import alluxio.metrics.MetricsSystem;
+import alluxio.retry.RetryUtils;
+import alluxio.security.authorization.Mode;
 import alluxio.util.CommonUtils;
-import alluxio.util.ConfigurationUtils;
 import alluxio.util.OSUtils;
 import alluxio.util.ShellUtils;
 import alluxio.util.WaitForOptions;
 
-import ru.serce.jnrfuse.ErrorCodes;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.serce.jnrfuse.ErrorCodes;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -48,11 +61,139 @@ import javax.annotation.concurrent.ThreadSafe;
 @ThreadSafe
 public final class AlluxioFuseUtils {
   private static final Logger LOG = LoggerFactory.getLogger(AlluxioFuseUtils.class);
-  private static final long THRESHOLD = new InstancedConfiguration(ConfigurationUtils.defaults())
+  private static final long THRESHOLD = Configuration.global()
       .getMs(PropertyKey.FUSE_LOGGING_THRESHOLD);
   private static final int MAX_ASYNC_RELEASE_WAITTIME_MS = 5000;
+  /** Most FileSystems on linux limit the length of file name beyond 255 characters. */
+  public static final int MAX_NAME_LENGTH = 255;
+
+  public static final String DEFAULT_USER_NAME = System.getProperty("user.name");
+  public static final long DEFAULT_UID = getUid(DEFAULT_USER_NAME);
+  public static final String DEFAULT_GROUP_NAME = getGroupName(DEFAULT_USER_NAME);
+  public static final long DEFAULT_GID = getGidFromGroupName(DEFAULT_GROUP_NAME);
+
+  public static final String INVALID_USER_GROUP_NAME = "";
+  public static final long ID_NOT_SET_VALUE = -1;
+  public static final long ID_NOT_SET_VALUE_UNSIGNED = 4294967295L;
+
+  public static final long MODE_NOT_SET_VALUE = -1;
 
   private AlluxioFuseUtils() {}
+
+  /**
+   * Checks the input file length.
+   *
+   * @param uri the Alluxio URI
+   * @return error code if file length is not allowed, 0 otherwise
+   */
+  public static int checkFileLength(AlluxioURI uri) {
+    if (uri.getName().length() > MAX_NAME_LENGTH) {
+      LOG.error("Failed to execute on {}: name longer than {} characters",
+          uri, MAX_NAME_LENGTH);
+      return -ErrorCodes.ENAMETOOLONG();
+    }
+    return 0;
+  }
+
+  /**
+   * Creates a file in alluxio namespace.
+   *
+   * @param fileSystem the file system
+   * @param authPolicy the authentication policy
+   * @param uri the alluxio uri
+   * @param mode the create mode
+   * @return a file out stream
+   */
+  public static FileOutStream createFile(FileSystem fileSystem, AuthPolicy authPolicy,
+      AlluxioURI uri, long mode) {
+    CreateFilePOptions.Builder optionsBuilder = CreateFilePOptions.newBuilder();
+    if (mode != MODE_NOT_SET_VALUE) {
+      optionsBuilder.setMode(new Mode((short) mode).toProto());
+    }
+    try {
+      FileOutStream out = fileSystem.createFile(uri,
+          optionsBuilder.build());
+      authPolicy.setUserGroupIfNeeded(uri);
+      return out;
+    } catch (IOException | AlluxioException e) {
+      throw new RuntimeException(String.format(
+          "Failed to create file %s [mode: %s, auth policy: %s]",
+          uri, mode, authPolicy.getClass().getName()), e);
+    }
+  }
+
+  /**
+   * Deletes a file or a directory in alluxio namespace.
+   *
+   * @param fileSystem the file system
+   * @param uri the alluxio uri
+   */
+  public static void deletePath(FileSystem fileSystem, AlluxioURI uri) {
+    try {
+      fileSystem.delete(uri);
+    } catch (IOException | AlluxioException e) {
+      throw new RuntimeException(String.format("Failed to delete path %s", uri), e);
+    }
+  }
+
+  /**
+   * Sets attribute for a file.
+   *
+   * @param fileSystem the file system
+   * @param uri the alluxio uri
+   * @param options the set attribute options
+   */
+  public static void setAttribute(FileSystem fileSystem,
+      AlluxioURI uri, SetAttributePOptions options) {
+    try {
+      fileSystem.setAttribute(uri, options);
+    } catch (IOException | AlluxioException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  /**
+   * Gets the libjnifuse version preference set by user.
+   *
+   * @param conf the configuration object
+   * @return the version preference
+   */
+  public static VersionPreference getVersionPreference(AlluxioConfiguration conf) {
+    if (Environment.isMac()) {
+      LOG.info("osxfuse doesn't support libfuse3 api. Using libfuse version 2.");
+      return VersionPreference.VERSION_2;
+    }
+
+    final int val = conf.getInt(PropertyKey.FUSE_JNIFUSE_LIBFUSE_VERSION);
+    if (val == 2) {
+      return VersionPreference.VERSION_2;
+    } else if (val == 3) {
+      return VersionPreference.VERSION_3;
+    } else {
+      return VersionPreference.NO;
+    }
+  }
+
+  /**
+   * Tries to laod Alluxio config from Alluxio Master through Grpc.
+   *
+   * @param fsContext for communicating with master
+   *
+   * @return the Alluxio config if loaded successfully; the unmodified conf otherwise
+   */
+  public static AlluxioConfiguration tryLoadingConfigFromMaster(FileSystemContext fsContext) {
+    try {
+      InetSocketAddress confMasterAddress =
+          fsContext.getMasterClientContext().getConfMasterInquireClient().getPrimaryRpcAddress();
+      RetryUtils.retry("load cluster default configuration with master " + confMasterAddress,
+          () -> fsContext.getClientContext().loadConfIfNotLoaded(confMasterAddress),
+          RetryUtils.defaultClientRetry());
+    } catch (IOException e) {
+      LOG.warn("Failed to load cluster default configuration for Fuse process. "
+          + "Proceed with local configuration for FUSE: {}", e.toString());
+    }
+    return fsContext.getClusterConf();
+  }
 
   /**
    * Retrieves the uid of the given user.
@@ -81,20 +222,21 @@ public final class AlluxioFuseUtils {
    * @return gid or -1 on failures
    */
   public static long getGidFromGroupName(String groupName) {
-    String result = "";
     try {
       if (OSUtils.isLinux()) {
         String script = "getent group " + groupName + " | cut -d: -f3";
-        result = ShellUtils.execCommand("bash", "-c", script).trim();
+        String result = ShellUtils.execCommand("bash", "-c", script).trim();
+        return Long.parseLong(result);
       } else if (OSUtils.isMacOS()) {
         String script = "dscl . -read /Groups/" + groupName
             + " | awk '($1 == \"PrimaryGroupID:\") { print $2 }'";
-        result = ShellUtils.execCommand("bash", "-c", script).trim();
+        String result = ShellUtils.execCommand("bash", "-c", script).trim();
+        return Long.parseLong(result);
       }
-      return Long.parseLong(result);
+      return ID_NOT_SET_VALUE;
     } catch (NumberFormatException | IOException e) {
       LOG.error("Failed to get gid from group name {}.", groupName);
-      return -1;
+      return ID_NOT_SET_VALUE;
     }
   }
 
@@ -104,8 +246,13 @@ public final class AlluxioFuseUtils {
    * @param uid user id
    * @return user name
    */
-  public static String getUserName(long uid) throws IOException {
-    return ShellUtils.execCommand("id", "-nu", Long.toString(uid)).trim();
+  public static String getUserName(long uid) {
+    try {
+      return ShellUtils.execCommand("bash", "-c", "id -nu " + uid).trim();
+    } catch (IOException e) {
+      LOG.error("Failed to get user name of uid {}", uid, e);
+      return INVALID_USER_GROUP_NAME;
+    }
   }
 
   /**
@@ -114,8 +261,14 @@ public final class AlluxioFuseUtils {
    * @param userName the user name
    * @return group name
    */
-  public static String getGroupName(String userName) throws IOException {
-    return ShellUtils.execCommand("id", "-ng", userName).trim();
+  public static String getGroupName(String userName) {
+    try {
+      List<String> groups = CommonUtils.getUnixGroups(userName);
+      return groups.isEmpty() ? INVALID_USER_GROUP_NAME : groups.get(0);
+    } catch (IOException e) {
+      LOG.error("Failed to get group name of user name {}", userName, e);
+      return INVALID_USER_GROUP_NAME;
+    }
   }
 
   /**
@@ -124,16 +277,21 @@ public final class AlluxioFuseUtils {
    * @param gid the group id
    * @return group name
    */
-  public static String getGroupName(long gid) throws IOException {
-    if (OSUtils.isLinux()) {
-      String script = "getent group " + gid + " | cut -d: -f1";
-      return ShellUtils.execCommand("bash", "-c", script).trim();
-    } else if (OSUtils.isMacOS()) {
-      String script =
-          "dscl . list /Groups PrimaryGroupID | awk '($2 == \"" + gid + "\") { print $1 }'";
-      return ShellUtils.execCommand("bash", "-c", script).trim();
+  public static String getGroupName(long gid) {
+    try {
+      if (OSUtils.isLinux()) {
+        String script = "getent group " + gid + " | cut -d: -f1";
+        return ShellUtils.execCommand("bash", "-c", script).trim();
+      } else if (OSUtils.isMacOS()) {
+        String script =
+            "dscl . list /Groups PrimaryGroupID | awk '($2 == \"" + gid + "\") { print $1 }'";
+        return ShellUtils.execCommand("bash", "-c", script).trim();
+      }
+    } catch (IOException e) {
+      LOG.error("Failed to get group name of gid {}", gid, e);
+      return INVALID_USER_GROUP_NAME;
     }
-    return "";
+    return INVALID_USER_GROUP_NAME;
   }
 
   /**
@@ -165,14 +323,13 @@ public final class AlluxioFuseUtils {
    * @return the uid (-u) or gid (-g) of username
    */
   private static long getIdInfo(String option, String username) {
-    String output;
     try {
-      output = ShellUtils.execCommand("id", option, username).trim();
-    } catch (IOException e) {
+      String output = ShellUtils.execCommand("id", option, username).trim();
+      return Long.parseLong(output);
+    } catch (IOException | NumberFormatException e) {
       LOG.error("Failed to get id from {} with option {}", username, option);
-      return -1;
+      return ID_NOT_SET_VALUE;
     }
-    return Long.parseLong(output);
   }
 
   /**
@@ -208,7 +365,8 @@ public final class AlluxioFuseUtils {
       return -ErrorCodes.EEXIST();
     } catch (InvalidPathException ex) {
       return -ErrorCodes.EFAULT();
-    } catch (BlockDoesNotExistException ex) {
+    } catch (BlockDoesNotExistRuntimeException ex) {
+      // TODO(jianjian) handle runtime exception for fuse in base class?
       return -ErrorCodes.ENODATA();
     } catch (DirectoryNotEmptyException ex) {
       return -ErrorCodes.ENOTEMPTY();
@@ -220,6 +378,23 @@ public final class AlluxioFuseUtils {
       return -ErrorCodes.EOPNOTSUPP();
     } catch (AlluxioException ex) {
       return -ErrorCodes.EBADMSG();
+    }
+  }
+
+  /**
+   * Gets the path status.
+   *
+   * @param fileSystem the file system
+   * @param uri the Alluxio uri to get status of
+   * @return the file status
+   */
+  public static Optional<URIStatus> getPathStatus(FileSystem fileSystem, AlluxioURI uri) {
+    try {
+      return Optional.of(fileSystem.getStatus(uri));
+    } catch (InvalidPathException | FileNotFoundException | FileDoesNotExistException e) {
+      return Optional.empty();
+    } catch (IOException | AlluxioException ex) {
+      throw new RuntimeException(String.format("Failed to get path status of %s", uri), ex);
     }
   }
 
@@ -274,19 +449,35 @@ public final class AlluxioFuseUtils {
    */
   public static int call(Logger logger, FuseCallable callable, String methodName,
       String description, Object... args) {
-    String debugDesc = logger.isDebugEnabled() ? String.format(description, args) : null;
-    logger.debug("Enter: {}({})", methodName, debugDesc);
-    long startMs = System.currentTimeMillis();
-    int ret = callable.call();
-    long durationMs = System.currentTimeMillis() - startMs;
-    MetricsSystem.timer(methodName).update(durationMs, TimeUnit.MILLISECONDS);
-    logger.debug("Exit ({}): {}({}) in {} ms", ret, methodName, debugDesc, durationMs);
-    if (ret < 0) {
-      MetricsSystem.counter(methodName + "Failures").inc();
-    }
-    if (durationMs >= THRESHOLD) {
-      logger.warn("{}({}) returned {} in {} ms (>={} ms)", methodName,
-          String.format(description, args), ret, durationMs, THRESHOLD);
+    int ret = -1;
+    try {
+      String debugDesc = logger.isDebugEnabled() ? String.format(description, args) : null;
+      logger.debug("Enter: {}({})", methodName, debugDesc);
+      long startMs = System.currentTimeMillis();
+      ret = callable.call();
+      long durationMs = System.currentTimeMillis() - startMs;
+      logger.debug("Exit ({}): {}({}) in {} ms", ret, methodName, debugDesc, durationMs);
+      MetricsSystem.timer(methodName).update(durationMs, TimeUnit.MILLISECONDS);
+      MetricsSystem.timer(MetricKey.FUSE_TOTAL_CALLS.getName())
+          .update(durationMs, TimeUnit.MILLISECONDS);
+      if (ret < 0) {
+        MetricsSystem.counter(methodName + "Failures").inc();
+      }
+      if (durationMs >= THRESHOLD) {
+        logger.warn("{}({}) returned {} in {} ms (>={} ms)", methodName,
+            String.format(description, args), ret, durationMs, THRESHOLD);
+      }
+    } catch (Throwable t) {
+      // native code cannot deal with any throwable
+      // wrap all the logics in try catch
+      String errorMessage = "";
+      try {
+        errorMessage = String.format(description, args);
+      } catch (Throwable inner) {
+        errorMessage = "";
+      }
+      LOG.error("Failed to {}({}) with unexpected throwable: ", methodName, errorMessage, t);
+      return -ErrorCodes.EIO();
     }
     return ret;
   }

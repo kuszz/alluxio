@@ -20,7 +20,6 @@ import java.io.Serializable;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
-
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -160,7 +159,7 @@ public final class GetWorkerReportOptions implements Serializable {
   /**
    * Enum representing the range of workers that we want to show capacity information for.
    */
-  public static enum WorkerRange {
+  public enum WorkerRange {
     ALL, // All workers
     LIVE, // Live workers
     LOST, // Lost workers
@@ -185,8 +184,9 @@ public final class GetWorkerReportOptions implements Serializable {
   /**
    * Enum representing the fields of the worker information.
    */
-  public static enum WorkerInfoField {
+  public enum WorkerInfoField {
     ADDRESS,
+    BLOCK_COUNT,
     WORKER_CAPACITY_BYTES,
     WORKER_CAPACITY_BYTES_ON_TIERS,
     ID,

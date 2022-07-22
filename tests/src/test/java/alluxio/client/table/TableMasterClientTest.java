@@ -12,9 +12,10 @@
 package alluxio.client.table;
 
 import alluxio.ClientContext;
+import alluxio.client.WriteType;
 import alluxio.client.file.FileSystem;
 import alluxio.conf.PropertyKey;
-import alluxio.conf.ServerConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.master.MasterClientContext;
 import alluxio.testutils.BaseIntegrationTest;
 import alluxio.testutils.LocalAlluxioClusterResource;
@@ -31,7 +32,7 @@ public final class TableMasterClientTest extends BaseIntegrationTest {
   @Rule
   public LocalAlluxioClusterResource mLocalAlluxioClusterResource =
       new LocalAlluxioClusterResource.Builder()
-          .setProperty(PropertyKey.USER_FILE_WRITE_TYPE_DEFAULT, "CACHE_THROUGH").build();
+          .setProperty(PropertyKey.USER_FILE_WRITE_TYPE_DEFAULT, WriteType.CACHE_THROUGH).build();
   private FileSystem mFileSystem = null;
   private FileSystemMasterClient mFSMasterClient;
   private TableMasterClient mTableMasterClient;
@@ -40,7 +41,7 @@ public final class TableMasterClientTest extends BaseIntegrationTest {
   public final void before() throws Exception {
     mFileSystem = mLocalAlluxioClusterResource.get().getClient();
     MasterClientContext context = MasterClientContext
-        .newBuilder(ClientContext.create(ServerConfiguration.global())).build();
+        .newBuilder(ClientContext.create(Configuration.global())).build();
     mTableMasterClient = new RetryHandlingTableMasterClient(context);
     mFSMasterClient = new FileSystemMasterClient(context);
   }

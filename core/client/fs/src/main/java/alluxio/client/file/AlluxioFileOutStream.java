@@ -15,21 +15,27 @@ import alluxio.AlluxioURI;
 import alluxio.Constants;
 import alluxio.client.AlluxioStorageType;
 import alluxio.client.UnderStorageType;
-import alluxio.client.block.AlluxioBlockStore;
+import alluxio.client.block.BlockStoreClient;
 import alluxio.client.block.policy.options.GetWorkerOptions;
 import alluxio.client.block.stream.BlockOutStream;
 import alluxio.client.block.stream.UnderFileSystemFileOutStream;
 import alluxio.client.file.options.OutStreamOptions;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.PreconditionMessage;
 import alluxio.exception.status.UnavailableException;
 import alluxio.grpc.CompleteFilePOptions;
+import alluxio.grpc.FileSystemMasterCommonPOptions;
 import alluxio.metrics.MetricKey;
 import alluxio.metrics.MetricsSystem;
 import alluxio.resource.CloseableResource;
+import alluxio.retry.ExponentialTimeBoundedRetry;
+import alluxio.retry.RetryPolicy;
 import alluxio.util.CommonUtils;
 import alluxio.util.FileSystemOptions;
 import alluxio.wire.BlockInfo;
+import alluxio.wire.OperationId;
 import alluxio.wire.WorkerNetAddress;
 
 import com.codahale.metrics.Counter;
@@ -41,7 +47,8 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-
+import java.util.Optional;
+import java.util.UUID;
 import javax.annotation.concurrent.NotThreadSafe;
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -62,7 +69,7 @@ public class AlluxioFileOutStream extends FileOutStream {
   private final AlluxioStorageType mAlluxioStorageType;
   private final UnderStorageType mUnderStorageType;
   private final FileSystemContext mContext;
-  private final AlluxioBlockStore mBlockStore;
+  private final BlockStoreClient mBlockStore;
   /** Stream to the file in the under storage, null if not writing to the under storage. */
   private final UnderFileSystemFileOutStream mUnderStorageOutputStream;
   private final OutStreamOptions mOptions;
@@ -96,7 +103,7 @@ public class AlluxioFileOutStream extends FileOutStream {
       mAlluxioStorageType = options.getAlluxioStorageType();
       mUnderStorageType = options.getUnderStorageType();
       mOptions = options;
-      mBlockStore = AlluxioBlockStore.create(mContext);
+      mBlockStore = BlockStoreClient.create(mContext);
       mPreviousBlockOutStreams = new ArrayList<>();
       mClosed = false;
       mCanceled = false;
@@ -106,19 +113,30 @@ public class AlluxioFileOutStream extends FileOutStream {
       if (!mUnderStorageType.isSyncPersist()) {
         mUnderStorageOutputStream = null;
       } else { // Write is through to the under storage, create mUnderStorageOutputStream.
-        GetWorkerOptions getWorkerOptions = GetWorkerOptions.defaults()
-            .setBlockWorkerInfos(mContext.getCachedWorkers())
-            .setBlockInfo(new BlockInfo()
-                .setBlockId(-1)
-                .setLength(0)); // not storing data to Alluxio, so block size is 0
-        WorkerNetAddress workerNetAddress =
-            options.getLocationPolicy().getWorker(getWorkerOptions);
-        if (workerNetAddress == null) {
+        // Create retry policy for initializing write.
+        AlluxioConfiguration pathConf = mContext.getPathConf(path);
+        RetryPolicy initRetryPolicy = ExponentialTimeBoundedRetry.builder()
+            .withMaxDuration(pathConf.getDuration(PropertyKey.USER_FILE_WRITE_INIT_MAX_DURATION))
+            .withInitialSleep(pathConf.getDuration(PropertyKey.USER_FILE_WRITE_INIT_SLEEP_MIN))
+            .withMaxSleep(pathConf.getDuration(PropertyKey.USER_FILE_WRITE_INIT_SLEEP_MAX))
+            .withSkipInitialSleep().build();
+        // Try find a worker from policy.
+        Optional<WorkerNetAddress> workerNetAddress = Optional.empty();
+        while (!workerNetAddress.isPresent() && initRetryPolicy.attempt()) {
+          GetWorkerOptions getWorkerOptions = GetWorkerOptions.defaults()
+                  .setBlockWorkerInfos(mContext.getCachedWorkers())
+                  .setBlockInfo(new BlockInfo()
+                  .setBlockId(-1)
+                  .setLength(0)); // not storing data to Alluxio, so block size is 0
+          workerNetAddress = options.getLocationPolicy().getWorker(getWorkerOptions);
+        }
+        if (!workerNetAddress.isPresent()) {
           // Assume no worker is available because block size is 0.
           throw new UnavailableException(ExceptionMessage.NO_WORKER_AVAILABLE.getMessage());
         }
         mUnderStorageOutputStream = mCloser
-            .register(UnderFileSystemFileOutStream.create(mContext, workerNetAddress, mOptions));
+            .register(UnderFileSystemFileOutStream.create(mContext,
+                workerNetAddress.get(), mOptions));
       }
     } catch (Throwable t) {
       throw CommonUtils.closeAndRethrow(mCloser, t);
@@ -142,6 +160,8 @@ public class AlluxioFileOutStream extends FileOutStream {
       }
 
       CompleteFilePOptions.Builder optionsBuilder = CompleteFilePOptions.newBuilder();
+      optionsBuilder.setCommonOptions(FileSystemMasterCommonPOptions.newBuilder()
+          .setOperationId(new OperationId(UUID.randomUUID()).toFsProto()).buildPartial());
       if (mUnderStorageType.isSyncPersist()) {
         if (mCanceled) {
           mUnderStorageOutputStream.cancel();
@@ -274,7 +294,7 @@ public class AlluxioFileOutStream extends FileOutStream {
   private void getNextBlock() throws IOException {
     if (mCurrentBlockOutStream != null) {
       Preconditions.checkState(mCurrentBlockOutStream.remaining() <= 0,
-          PreconditionMessage.ERR_BLOCK_REMAINING);
+          "The current block still has space left, no need to get new block");
       mCurrentBlockOutStream.flush();
       mPreviousBlockOutStreams.add(mCurrentBlockOutStream);
     }
@@ -311,6 +331,9 @@ public class AlluxioFileOutStream extends FileOutStream {
    */
   @ThreadSafe
   private static final class Metrics {
+    // Note that only counter can be added here.
+    // Both meter and timer need to be used inline
+    // because new meter and timer will be created after {@link MetricsSystem.resetAllMetrics()}
     private static final Counter BYTES_WRITTEN_UFS =
         MetricsSystem.counter(MetricKey.CLIENT_BYTES_WRITTEN_UFS.getName());
 

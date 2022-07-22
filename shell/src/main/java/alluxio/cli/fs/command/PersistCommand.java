@@ -41,7 +41,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -220,6 +219,7 @@ public final class PersistCommand extends AbstractFileSystemCommand {
           }
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
+          LOG.warn("Interrupted while waiting for persistence ", e);
           throw e;
         } catch (TimeoutException e) {
           String timeoutMsg =

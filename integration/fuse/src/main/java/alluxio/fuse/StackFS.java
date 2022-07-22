@@ -280,7 +280,7 @@ public class StackFS extends AbstractFuseFileSystem {
   }
 
   @Override
-  public int rename(String oldPath, String newPath) {
+  public int rename(String oldPath, String newPath, int flags) {
     return AlluxioFuseUtils.call(LOG, () -> renameInternal(oldPath, newPath),
         "Stackfs.Rename", "oldPath=%s,newPath=%s,", oldPath, newPath);
   }
@@ -332,7 +332,7 @@ public class StackFS extends AbstractFuseFileSystem {
   @Override
   public int chown(String path, long uid, long gid) {
     return AlluxioFuseUtils.call(LOG, () -> chownInternal(path, uid, gid),
-        "Stackfs.Chown", "path=%s,uid=%o,gid=%o", path, uid, gid);
+        "Stackfs.Chown", "path=%s,uid=%d,gid=%d", path, uid, gid);
   }
 
   private int chownInternal(String path, long uid, long gid) {

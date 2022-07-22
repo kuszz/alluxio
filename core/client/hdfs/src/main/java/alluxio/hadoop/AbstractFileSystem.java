@@ -25,7 +25,6 @@ import alluxio.conf.InstancedConfiguration;
 import alluxio.conf.PropertyKey;
 import alluxio.conf.Source;
 import alluxio.exception.AlluxioException;
-import alluxio.exception.ExceptionMessage;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.InvalidPathException;
 import alluxio.grpc.CheckAccessPOptions;
@@ -36,13 +35,13 @@ import alluxio.grpc.SetAttributePOptions;
 import alluxio.master.MasterInquireClient.Factory;
 import alluxio.security.CurrentUser;
 import alluxio.security.authorization.Mode;
-import alluxio.util.ConfigurationUtils;
 import alluxio.wire.BlockLocationInfo;
 import alluxio.wire.FileBlockInfo;
 import alluxio.wire.WorkerNetAddress;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.HostAndPort;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -61,12 +60,12 @@ import java.net.URI;
 import java.security.AccessControlContext;
 import java.security.AccessController;
 import java.security.PrivilegedExceptionAction;
+import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 import javax.security.auth.Subject;
@@ -189,8 +188,8 @@ public abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem
                 "Not allowed to create() (overwrite=false) for existing Alluxio path: " + uri);
           }
           if (mFileSystem.getStatus(uri).isFolder()) {
-            throw new IOException(
-                ExceptionMessage.FILE_CREATE_IS_DIRECTORY.getMessage(uri));
+            throw new IOException(MessageFormat
+                .format("{0} already exists. Directories cannot be overwritten with create", uri));
           }
           mFileSystem.delete(uri);
         }
@@ -261,7 +260,7 @@ public abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem
       mFileSystem.delete(uri, options);
       return true;
     } catch (InvalidPathException | FileDoesNotExistException e) {
-      LOG.warn("delete failed: {}", e.toString());
+      LOG.debug("delete failed: {}", e.toString());
       return false;
     } catch (AlluxioException e) {
       throw new IOException(e);
@@ -272,6 +271,11 @@ public abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem
   public long getDefaultBlockSize() {
     return mFileSystem.getConf()
         .getBytes(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT);
+  }
+
+  @Override
+  public String getCanonicalServiceName() {
+    return null;
   }
 
   @Nullable
@@ -414,7 +418,7 @@ public abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem
    */
   @Override
   public void setPermission(Path path, FsPermission permission) throws IOException {
-    LOG.debug("setMode({},{})", path, permission.toString());
+    LOG.debug("setMode({},{})", path, permission);
     AlluxioURI uri = getAlluxioPath(path);
     SetAttributePOptions options = SetAttributePOptions.newBuilder()
         .setMode(new Mode(permission.toShort()).toProto()).setRecursive(false).build();
@@ -493,14 +497,14 @@ public abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem
 
     // take the URI properties, hadoop configuration, and given Alluxio configuration and merge
     // all three into a single object.
-    Map<String, Object> uriConfProperties = getConfigurationFromUri(uri);
+    Map<String, Object> uriConfProperties = getConfigurationFromUri(uri, conf);
     Map<String, Object> hadoopConfProperties =
         HadoopConfigurationUtils.getConfigurationFromHadoop(conf);
     LOG.info("Creating Alluxio configuration from Hadoop configuration {}, uri configuration {}",
         hadoopConfProperties, uriConfProperties);
     AlluxioProperties alluxioProps =
         (alluxioConfiguration != null) ? alluxioConfiguration.copyProperties()
-            : ConfigurationUtils.defaults();
+            : alluxio.conf.Configuration.copyProperties();
     // Merge relevant Hadoop configuration into Alluxio's configuration.
     alluxioProps.merge(hadoopConfProperties, Source.RUNTIME);
     // Merge relevant connection details in the URI with the highest priority
@@ -715,9 +719,9 @@ public abstract class AbstractFileSystem extends org.apache.hadoop.fs.FileSystem
   /**
    * Gets the connection configuration from the input uri.
    *
-   * @param uri a Alluxio Uri that may contain connection configuration
+   * @param uri an Alluxio Uri that may contain connection configuration
    */
-  protected abstract Map<String, Object> getConfigurationFromUri(URI uri);
+  protected abstract Map<String, Object> getConfigurationFromUri(URI uri, Configuration conf);
 
   /**
    * Validates given FS base URI for scheme and authority.

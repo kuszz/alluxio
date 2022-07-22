@@ -13,10 +13,13 @@ package alluxio.client.file;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.anyInt;
+import static org.junit.Assume.assumeTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -26,20 +29,22 @@ import static org.mockito.Mockito.when;
 
 import alluxio.AlluxioURI;
 import alluxio.ClientContext;
-import alluxio.ConfigurationTestUtils;
-import alluxio.client.block.AlluxioBlockStore;
+import alluxio.client.block.BlockStoreClient;
 import alluxio.client.block.BlockWorkerInfo;
 import alluxio.client.block.stream.BlockInStream;
 import alluxio.client.block.stream.BlockInStream.BlockInStreamSource;
+import alluxio.client.block.stream.BlockWorkerClient;
 import alluxio.client.block.stream.TestBlockInStream;
 import alluxio.client.file.options.InStreamOptions;
 import alluxio.client.util.ClientTestUtils;
+import alluxio.conf.Configuration;
 import alluxio.conf.InstancedConfiguration;
 import alluxio.conf.PropertyKey;
 import alluxio.exception.PreconditionMessage;
 import alluxio.exception.status.UnavailableException;
 import alluxio.grpc.OpenFilePOptions;
 import alluxio.grpc.ReadPType;
+import alluxio.resource.CloseableResource;
 import alluxio.util.io.BufferUtils;
 import alluxio.wire.BlockInfo;
 import alluxio.wire.FileBlockInfo;
@@ -73,46 +78,49 @@ import java.util.List;
  */
 @RunWith(PowerMockRunner.class)
 @PowerMockRunnerDelegate(Parameterized.class)
-@PrepareForTest({FileSystemContext.class, AlluxioBlockStore.class, BlockInStream.class})
+@PrepareForTest({BlockStoreClient.class})
 public final class AlluxioFileInStreamTest {
   private static final long BLOCK_LENGTH = 100L;
-  private static final long FILE_LENGTH = 350L;
-  private static final long NUM_STREAMS = ((FILE_LENGTH - 1) / BLOCK_LENGTH) + 1;
-
-  private AlluxioBlockStore mBlockStore;
-  private BlockInStreamSource mBlockSource;
+  private final BlockInStreamSource mBlockSource;
+  private final long mFileSize;
+  private final long mNumBlocks;
+  private BlockStoreClient mBlockStore;
   private FileSystemContext mContext;
   private FileInfo mInfo;
   private URIStatus mStatus;
 
-  private static InstancedConfiguration sConf = ConfigurationTestUtils.defaults();
+  private final InstancedConfiguration mConf = Configuration.copyGlobal();
 
   private List<TestBlockInStream> mInStreams;
 
-  private FileInStream mTestStream;
+  private AlluxioFileInStream mTestStream;
 
   /**
-   * @return a list of all sources of where the blocks reside
+   * @return a list of all sources of where the blocks reside and file size
    */
   @Parameterized.Parameters
   public static Collection<Object[]> data() {
     return Arrays.asList(new Object[][] {
-      {BlockInStreamSource.PROCESS_LOCAL},
-      {BlockInStreamSource.NODE_LOCAL},
-      {BlockInStreamSource.UFS},
-      {BlockInStreamSource.REMOTE}
+      {BlockInStreamSource.PROCESS_LOCAL, 350L},
+      {BlockInStreamSource.NODE_LOCAL, 350L},
+      {BlockInStreamSource.UFS, 350L},
+      {BlockInStreamSource.REMOTE, 350L},
+      {BlockInStreamSource.REMOTE, 800L}
     });
   }
 
   /**
    * @param blockSource the source of the block to read
+   * @param fileSize file size in bytes
    */
-  public AlluxioFileInStreamTest(BlockInStreamSource blockSource) {
+  public AlluxioFileInStreamTest(BlockInStreamSource blockSource, long fileSize) {
     mBlockSource = blockSource;
+    mFileSize = fileSize;
+    mNumBlocks = (mFileSize - 1) / BLOCK_LENGTH + 1;
   }
 
-  private long getBlockLength(int streamId) {
-    return streamId == NUM_STREAMS - 1 ? 50 : BLOCK_LENGTH;
+  private long getBlockLength(int blockIndex) {
+    return Math.min(mFileSize, BLOCK_LENGTH * (blockIndex + 1)) - BLOCK_LENGTH * blockIndex;
   }
 
   /**
@@ -120,63 +128,71 @@ public final class AlluxioFileInStreamTest {
    */
   @Before
   public void before() throws Exception {
-    sConf = ConfigurationTestUtils.defaults();
-    mInfo = new FileInfo().setBlockSizeBytes(BLOCK_LENGTH).setLength(FILE_LENGTH);
+    mInfo = new FileInfo().setBlockSizeBytes(BLOCK_LENGTH).setLength(mFileSize);
 
-    ClientTestUtils.setSmallBufferSizes(sConf);
-    sConf.set(PropertyKey.USER_BLOCK_READ_RETRY_SLEEP_MIN, "1ms");
-    sConf.set(PropertyKey.USER_BLOCK_READ_RETRY_SLEEP_MAX, "5ms");
-    sConf.set(PropertyKey.USER_BLOCK_READ_RETRY_MAX_DURATION, "1s");
+    ClientTestUtils.setSmallBufferSizes(mConf);
+    mConf.set(PropertyKey.USER_BLOCK_READ_RETRY_SLEEP_MIN, "1ms");
+    mConf.set(PropertyKey.USER_BLOCK_READ_RETRY_SLEEP_MAX, "5ms");
+    mConf.set(PropertyKey.USER_BLOCK_READ_RETRY_MAX_DURATION, "1s");
 
-    mContext = PowerMockito.mock(FileSystemContext.class);
-    when(mContext.getClientContext()).thenReturn(ClientContext.create(sConf));
-    when(mContext.getClusterConf()).thenReturn(sConf);
-    when(mContext.getPathConf(any(AlluxioURI.class))).thenReturn(sConf);
-    PowerMockito.when(mContext.getNodeLocalWorker()).thenReturn(new WorkerNetAddress());
-    mBlockStore = mock(AlluxioBlockStore.class);
-    PowerMockito.mockStatic(AlluxioBlockStore.class);
-    PowerMockito.when(AlluxioBlockStore.create(mContext)).thenReturn(mBlockStore);
+    BlockWorkerClient client = mock(BlockWorkerClient.class);
+    doNothing().when(client).cache(any());
+
+    mContext = mock(FileSystemContext.class);
+    when(mContext.getClientContext()).thenReturn(ClientContext.create(mConf));
+    when(mContext.getClusterConf()).thenReturn(mConf);
+    when(mContext.getPathConf(any(AlluxioURI.class))).thenReturn(mConf);
+    when(mContext.getNodeLocalWorker()).thenReturn(new WorkerNetAddress());
     when(mContext.getCachedWorkers()).thenReturn(new ArrayList<>());
+    when(mContext.acquireBlockWorkerClient(any()))
+        .thenReturn(new CloseableResource<BlockWorkerClient>(client) {
+          @Override
+          public void closeResource() {}
+        });
+    mBlockStore = mock(BlockStoreClient.class);
+    PowerMockito.mockStatic(BlockStoreClient.class);
+    PowerMockito.when(BlockStoreClient.create(mContext)).thenReturn(mBlockStore);
 
     // Set up BufferedBlockInStreams and caching streams
     mInStreams = new ArrayList<>();
     List<Long> blockIds = new ArrayList<>();
     List<FileBlockInfo> fileBlockInfos = new ArrayList<>();
-    for (int i = 0; i < NUM_STREAMS; i++) {
+    for (int i = 0; i < mNumBlocks; i++) {
       blockIds.add((long) i);
       FileBlockInfo fbInfo = new FileBlockInfo().setBlockInfo(new BlockInfo().setBlockId(i));
       fileBlockInfos.add(fbInfo);
       final byte[] input = BufferUtils
           .getIncreasingByteArray((int) (i * BLOCK_LENGTH), (int) getBlockLength(i));
-      mInStreams.add(new TestBlockInStream(input, i, input.length, false, mBlockSource));
+      mInStreams.add(new TestBlockInStream(input, i, input.length, mBlockSource));
       when(mContext.getCachedWorkers())
           .thenReturn(Arrays.asList(new BlockWorkerInfo(new WorkerNetAddress(), 0, 0)));
       when(mBlockStore.getInStream(eq((long) i), any(InStreamOptions.class), any()))
           .thenAnswer(invocation -> {
             long blockId = (Long) invocation.getArguments()[0];
             return mInStreams.get((int) blockId).isClosed() ? new TestBlockInStream(input,
-                blockId, input.length, false, mBlockSource) : mInStreams.get((int) blockId);
+                blockId, input.length, mBlockSource) : mInStreams.get((int) blockId);
           });
       when(mBlockStore.getInStream(eq(new BlockInfo().setBlockId(i)), any(InStreamOptions.class),
           any())).thenAnswer(invocation -> {
             long blockId = ((BlockInfo) invocation.getArguments()[0]).getBlockId();
             return mInStreams.get((int) blockId).isClosed() ? new TestBlockInStream(input,
-                blockId, input.length, false, mBlockSource) : mInStreams.get((int) blockId);
+                blockId, input.length, mBlockSource) : mInStreams.get((int) blockId);
           });
     }
     mInfo.setBlockIds(blockIds);
-    mInfo.setFileBlockInfos(fileBlockInfos);
+    mInfo.setFileBlockInfos(fileBlockInfos).setReplicationMax(1);
     mStatus = new URIStatus(mInfo);
 
     OpenFilePOptions readOptions =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
     mTestStream = new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, readOptions,
-        sConf), mContext);
+        mConf), mContext);
   }
 
   @After
-  public void after() {
-    ClientTestUtils.resetClient(sConf);
+  public void after() throws Exception {
+    mTestStream.close();
+    ClientTestUtils.resetClient(mConf);
   }
 
   /**
@@ -184,10 +200,9 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void singleByteRead() throws Exception {
-    for (int i = 0; i < FILE_LENGTH; i++) {
+    for (int i = 0; i < mFileSize; i++) {
       assertEquals(i & 0xff, mTestStream.read());
     }
-    mTestStream.close();
   }
 
   /**
@@ -195,7 +210,7 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void readHalfFile() throws Exception {
-    testReadBuffer((int) (FILE_LENGTH / 2));
+    testReadBuffer((int) (mFileSize / 2));
   }
 
   /**
@@ -223,8 +238,6 @@ public final class AlluxioFileInStreamTest {
     byte[] buffer = new byte[dataRead];
     mTestStream.read(buffer);
     assertEquals(true, mInStreams.get(0).isClosed());
-    mTestStream.close();
-
     assertArrayEquals(BufferUtils.getIncreasingByteArray(dataRead), buffer);
   }
 
@@ -233,7 +246,7 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void readFile() throws Exception {
-    testReadBuffer((int) FILE_LENGTH);
+    testReadBuffer((int) mFileSize);
   }
 
   /**
@@ -241,15 +254,13 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void readFileStreamCloseOnEnd() throws Exception {
-    int dataRead = (int) FILE_LENGTH;
+    int dataRead = (int) mFileSize;
     byte[] buffer = new byte[dataRead];
     mTestStream.read(buffer);
 
-    for (int i = 0; i < NUM_STREAMS; i++) {
+    for (int i = 0; i < mNumBlocks; i++) {
       assertEquals(true, mInStreams.get(i).isClosed());
     }
-    mTestStream.close();
-
     assertArrayEquals(BufferUtils.getIncreasingByteArray(dataRead), buffer);
   }
 
@@ -275,15 +286,14 @@ public final class AlluxioFileInStreamTest {
   public void readManyChunks() throws IOException {
     int chunksize = 10;
     // chunksize must divide FILE_LENGTH evenly for this test to work
-    assertEquals(0, FILE_LENGTH % chunksize);
+    assertEquals(0, mFileSize % chunksize);
     byte[] buffer = new byte[chunksize];
     int offset = 0;
-    for (int i = 0; i < FILE_LENGTH / chunksize; i++) {
+    for (int i = 0; i < mFileSize / chunksize; i++) {
       mTestStream.read(buffer, 0, chunksize);
       assertArrayEquals(BufferUtils.getIncreasingByteArray(offset, chunksize), buffer);
       offset += chunksize;
     }
-    mTestStream.close();
   }
 
   /**
@@ -292,17 +302,18 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void testRemaining() throws IOException {
-    assertEquals(FILE_LENGTH, mTestStream.remaining());
+    assumeTrue(mFileSize > 310);
+    assertEquals(mFileSize, mTestStream.remaining());
     mTestStream.read();
-    assertEquals(FILE_LENGTH - 1, mTestStream.remaining());
+    assertEquals(mFileSize - 1, mTestStream.remaining());
     mTestStream.read(new byte[150]);
-    assertEquals(FILE_LENGTH - 151, mTestStream.remaining());
+    assertEquals(mFileSize - 151, mTestStream.remaining());
     mTestStream.skip(140);
-    assertEquals(FILE_LENGTH - 291, mTestStream.remaining());
+    assertEquals(mFileSize - 291, mTestStream.remaining());
     mTestStream.seek(310);
-    assertEquals(FILE_LENGTH - 310, mTestStream.remaining());
+    assertEquals(mFileSize - 310, mTestStream.remaining());
     mTestStream.seek(130);
-    assertEquals(FILE_LENGTH - 130, mTestStream.remaining());
+    assertEquals(mFileSize - 130, mTestStream.remaining());
   }
 
   /**
@@ -311,6 +322,7 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void testSeek() throws IOException {
+    assumeTrue(mFileSize >= BLOCK_LENGTH * 3.1);
     int seekAmount = (int) (BLOCK_LENGTH / 2);
     int readAmount = (int) (BLOCK_LENGTH * 2);
     byte[] buffer = new byte[readAmount];
@@ -329,7 +341,7 @@ public final class AlluxioFileInStreamTest {
     // Seek a short way past start of block 3
     mTestStream.seek((long) (BLOCK_LENGTH * 3.1));
     assertEquals(BufferUtils.byteToInt((byte) (BLOCK_LENGTH * 3.1)), mTestStream.read());
-    mTestStream.seek(FILE_LENGTH);
+    mTestStream.seek(mFileSize);
   }
 
   /**
@@ -356,12 +368,12 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void seekToLastBlockAfterReachingEOF() throws IOException {
-    mTestStream.read(new byte[(int) FILE_LENGTH]);
-    mTestStream.seek(FILE_LENGTH - BLOCK_LENGTH);
+    mTestStream.read(new byte[(int) mFileSize]);
+    mTestStream.seek(mFileSize - BLOCK_LENGTH);
     byte[] block = new byte[(int) BLOCK_LENGTH];
     mTestStream.read(block);
     assertArrayEquals(BufferUtils.getIncreasingByteArray(
-        (int) (FILE_LENGTH - BLOCK_LENGTH), (int) BLOCK_LENGTH), block);
+        (int) (mFileSize - BLOCK_LENGTH), (int) BLOCK_LENGTH), block);
   }
 
   /**
@@ -369,7 +381,7 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void seekToEOFBeforeReadingFirstBlock() throws IOException {
-    mTestStream.seek(FILE_LENGTH);
+    mTestStream.seek(mFileSize);
     mTestStream.seek(0);
     byte[] block = new byte[(int) BLOCK_LENGTH];
     mTestStream.read(block);
@@ -385,7 +397,7 @@ public final class AlluxioFileInStreamTest {
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
     mTestStream =
-        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, sConf), mContext);
+        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4 + BLOCK_LENGTH);
     int readAmount = (int) (BLOCK_LENGTH * 3 - BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
@@ -404,11 +416,11 @@ public final class AlluxioFileInStreamTest {
   @Test
   public void testSeekWithNoLocalWorker() throws IOException {
     // Overrides the get local worker call
-    PowerMockito.when(mContext.getNodeLocalWorker()).thenReturn(null);
+    when(mContext.getNodeLocalWorker()).thenReturn(null);
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
     mTestStream =
-        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, sConf), mContext);
+        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf), mContext);
     int readAmount = (int) (BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
     // read and seek several times
@@ -427,7 +439,7 @@ public final class AlluxioFileInStreamTest {
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
     mTestStream =
-        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, sConf), mContext);
+        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 2);
     mTestStream.seek(seekAmount);
     mTestStream.close();
@@ -444,7 +456,7 @@ public final class AlluxioFileInStreamTest {
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
     mTestStream =
-        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, sConf), mContext);
+        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4);
     int readAmount = (int) (BLOCK_LENGTH * 2 - BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
@@ -470,7 +482,7 @@ public final class AlluxioFileInStreamTest {
   public void longSeekForwardCachingPartiallyReadBlocks() throws IOException {
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
-    mTestStream = new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, sConf),
+    mTestStream = new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf),
         mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4 + BLOCK_LENGTH);
     int readAmount = (int) (BLOCK_LENGTH / 2);
@@ -496,8 +508,8 @@ public final class AlluxioFileInStreamTest {
   public void shortSeekForwardCachingPartiallyReadBlocks() throws IOException {
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
-    mTestStream = new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options,
-        sConf), mContext);
+    mTestStream =
+        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4);
     int readAmount = (int) (BLOCK_LENGTH * 2 - BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
@@ -524,7 +536,7 @@ public final class AlluxioFileInStreamTest {
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
     mTestStream =
-        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, sConf), mContext);
+        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf), mContext);
     int readAmount = (int) (BLOCK_LENGTH / 2);
     byte[] buffer = new byte[readAmount];
     mTestStream.read(buffer);
@@ -542,8 +554,8 @@ public final class AlluxioFileInStreamTest {
   public void seekBackwardToFileBeginning() throws IOException {
     OpenFilePOptions options =
         OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
-    mTestStream = new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options,
-        sConf), mContext);
+    mTestStream =
+        new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, options, mConf), mContext);
     int seekAmount = (int) (BLOCK_LENGTH / 4 + BLOCK_LENGTH);
 
     // Seek forward.
@@ -570,6 +582,7 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void testSkip() throws IOException {
+    assumeTrue(mNumBlocks > 3);
     int skipAmount = (int) (BLOCK_LENGTH / 2);
     int readAmount = (int) (BLOCK_LENGTH * 2);
     byte[] buffer = new byte[readAmount];
@@ -586,7 +599,7 @@ public final class AlluxioFileInStreamTest {
   }
 
   /**
-   * Tests that {@link IOException}s thrown by the {@link AlluxioBlockStore} are properly
+   * Tests that {@link IOException}s thrown by the {@link BlockStoreClient} are properly
    * propagated.
    */
   @Test
@@ -606,7 +619,7 @@ public final class AlluxioFileInStreamTest {
    */
   @Test
   public void readOutOfBounds() throws IOException {
-    mTestStream.read(new byte[(int) FILE_LENGTH]);
+    mTestStream.read(new byte[(int) mFileSize]);
     assertEquals(-1, mTestStream.read());
     assertEquals(-1, mTestStream.read(new byte[10]));
   }
@@ -645,11 +658,11 @@ public final class AlluxioFileInStreamTest {
   @Test
   public void seekPastEnd() throws IOException {
     try {
-      mTestStream.seek(FILE_LENGTH + 1);
+      mTestStream.seek(mFileSize + 1);
       fail("seeking past the end of the stream should fail");
     } catch (IllegalArgumentException e) {
       assertEquals(String.format(PreconditionMessage.ERR_SEEK_PAST_END_OF_FILE.toString(),
-          FILE_LENGTH + 1), e.getMessage());
+          mFileSize + 1), e.getMessage());
     }
   }
 
@@ -763,7 +776,7 @@ public final class AlluxioFileInStreamTest {
         .thenAnswer(new Answer<BlockInStream>() {
           @Override
           public BlockInStream answer(InvocationOnMock invocation) throws Throwable {
-            return new TestBlockInStream(new byte[1], 0, BLOCK_LENGTH, false, mBlockSource);
+            return new TestBlockInStream(new byte[1], 0, BLOCK_LENGTH, mBlockSource);
           }
         });
     byte[] buffer = new byte[(int) BLOCK_LENGTH];
@@ -775,6 +788,30 @@ public final class AlluxioFileInStreamTest {
     }
   }
 
+  @Test
+  public void getPos() throws Exception {
+    assertEquals(0, mTestStream.getPos());
+    mTestStream.read();
+    assertEquals(1, mTestStream.getPos());
+    mTestStream.read(new byte[(int) mFileSize], 0, (int) mFileSize);
+    assertEquals(mFileSize, mTestStream.getPos());
+  }
+
+  // See https://github.com/Alluxio/alluxio/issues/13828
+  @Test
+  public void triggerAsyncOnClose() throws Exception {
+    assumeTrue(mBlockSource == BlockInStreamSource.UFS);
+    mInfo.setReplicationMax(1);
+    mStatus = new URIStatus(mInfo);
+    OpenFilePOptions readOptions =
+        OpenFilePOptions.newBuilder().setReadType(ReadPType.CACHE_PROMOTE).build();
+    mTestStream = new AlluxioFileInStream(mStatus, new InStreamOptions(mStatus, readOptions,
+        mConf), mContext);
+    mTestStream.read(new byte[(int) mFileSize], 0, (int) mFileSize);
+    assertEquals(mFileSize, mTestStream.getPos());
+    assertTrue(mTestStream.triggerAsyncCaching(mInStreams.get(mInStreams.size() - 1)));
+  }
+
   /**
    * Tests that reading dataRead bytes into a buffer will properly write those bytes to the cache
    * streams and that the correct bytes are read from the {@link FileInStream}.
@@ -784,8 +821,6 @@ public final class AlluxioFileInStreamTest {
   private void testReadBuffer(int dataRead) throws Exception {
     byte[] buffer = new byte[dataRead];
     mTestStream.read(buffer);
-    mTestStream.close();
-
     assertArrayEquals(BufferUtils.getIncreasingByteArray(dataRead), buffer);
   }
 

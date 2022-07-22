@@ -23,7 +23,9 @@ exports[`Workers Shallow component Matches snapshot 1`] = `
         >
           <thead>
             <tr>
-              <th>
+              <th
+                id="id-nodename"
+              >
                 Node Name
               </th>
               <th>
@@ -31,6 +33,9 @@ exports[`Workers Shallow component Matches snapshot 1`] = `
               </th>
               <th>
                 State
+              </th>
+              <th>
+                Block Count
               </th>
               <th>
                 Workers Capacity

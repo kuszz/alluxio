@@ -11,10 +11,11 @@
 
 package alluxio.heartbeat;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -62,6 +63,8 @@ public final class HeartbeatContext {
   public static final String WORKER_PIN_LIST_SYNC = "Worker Pin List Sync";
   public static final String WORKER_SPACE_RESERVER = "Worker Space Reserver";
   public static final String WORKER_STORAGE_HEALTH = "Worker Storage Health";
+  public static final String MASTER_WORKER_REGISTER_SESSION_CLEANER =
+      "Worker register stream session cleaner";
 
   static {
     sTimerClasses = new HashMap<>();
@@ -95,6 +98,7 @@ public final class HeartbeatContext {
     sTimerClasses.put(WORKER_PIN_LIST_SYNC, SLEEPING_TIMER_CLASS);
     sTimerClasses.put(WORKER_SPACE_RESERVER, SLEEPING_TIMER_CLASS);
     sTimerClasses.put(WORKER_STORAGE_HEALTH, SLEEPING_TIMER_CLASS);
+    sTimerClasses.put(MASTER_WORKER_REGISTER_SESSION_CLEANER, SLEEPING_TIMER_CLASS);
   }
 
   private HeartbeatContext() {} // to prevent initialization
@@ -123,7 +127,8 @@ public final class HeartbeatContext {
    * @param timerClass the timer class to use for the executor thread
    */
   @SuppressWarnings("unused")
-  private static synchronized void setTimerClass(String name,
+  @VisibleForTesting
+  static synchronized void setTimerClass(String name,
       Class<? extends HeartbeatTimer> timerClass) {
     if (timerClass == null) {
       sTimerClasses.remove(name);

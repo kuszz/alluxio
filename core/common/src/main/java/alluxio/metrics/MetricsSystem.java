@@ -13,13 +13,12 @@ package alluxio.metrics;
 
 import alluxio.AlluxioURI;
 import alluxio.conf.AlluxioConfiguration;
-import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.conf.PropertyKey;
 import alluxio.grpc.MetricType;
 import alluxio.grpc.MetricValue;
 import alluxio.metrics.sink.Sink;
 import alluxio.util.CommonUtils;
-import alluxio.util.ConfigurationUtils;
 import alluxio.util.network.NetworkAddressUtils;
 
 import com.codahale.metrics.CachedGauge;
@@ -47,11 +46,11 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
@@ -68,8 +67,7 @@ public final class MetricsSystem {
 
   private static final ConcurrentHashMap<String, String> CACHED_METRICS = new ConcurrentHashMap<>();
   private static int sResolveTimeout =
-      (int) new InstancedConfiguration(ConfigurationUtils.defaults())
-          .getMs(PropertyKey.NETWORK_HOST_RESOLUTION_TIMEOUT_MS);
+      (int) Configuration.getMs(PropertyKey.NETWORK_HOST_RESOLUTION_TIMEOUT_MS);
   // A map from AlluxioURI to corresponding cached escaped path.
   private static final ConcurrentHashMap<AlluxioURI, String> CACHED_ESCAPED_PATH
       = new ConcurrentHashMap<>();
@@ -83,24 +81,28 @@ public final class MetricsSystem {
   private static final Pattern METRIC_NAME_PATTERN = Pattern.compile("^(.*?[.].*?)[.].*");
   // A flag telling whether metrics have been reported yet.
   // Using this prevents us from initializing {@link #SHOULD_REPORT_METRICS} more than once
-  private static boolean sReported = false;
+  private static Set<InstanceType> sReported = new HashSet<>();
   // The source of the metrics in this metrics system.
   // It can be set through property keys based on process types.
   // Local hostname will be used if no related property key founds.
   private static Supplier<String> sSourceNameSupplier =
       CommonUtils.memoize(() -> constructSourceName());
+  private static final Map<String, InstrumentedExecutorService>
+      EXECUTOR_SERVICES = new ConcurrentHashMap<>();
 
   /**
    * An enum of supported instance type.
    */
   public enum InstanceType {
-    JOB_MASTER("JobMaster"),
-    JOB_WORKER("JobWorker"),
+    CLUSTER("Cluster"),
+    SERVER("Server"),
     MASTER("Master"),
     WORKER("Worker"),
-    CLUSTER("Cluster"),
-    CLIENT("Client"),
+    JOB_MASTER("JobMaster"),
+    JOB_WORKER("JobWorker"),
+    PLUGIN("Plugin"),
     PROXY("Proxy"),
+    CLIENT("Client"),
     FUSE("Fuse");
 
     private String mValue;
@@ -147,6 +149,7 @@ public final class MetricsSystem {
     METRIC_REGISTRY.registerAll(new MemoryUsageGaugeSet());
     METRIC_REGISTRY.registerAll(new ClassLoadingGaugeSet());
     METRIC_REGISTRY.registerAll(new CachedThreadStatesGaugeSet(5, TimeUnit.SECONDS));
+    METRIC_REGISTRY.registerAll(new OperationSystemGaugeSet());
   }
 
   @GuardedBy("MetricsSystem")
@@ -202,9 +205,9 @@ public final class MetricsSystem {
       default:
         break;
     }
-    AlluxioConfiguration conf = new InstancedConfiguration(ConfigurationUtils.defaults());
+    AlluxioConfiguration conf = Configuration.global();
     if (sourceKey != null && conf.isSet(sourceKey)) {
-      return conf.get(sourceKey);
+      return conf.getString(sourceKey);
     }
     String hostName;
     // Avoid throwing RuntimeException when hostname
@@ -262,6 +265,14 @@ public final class MetricsSystem {
   }
 
   /**
+   * @return true if the metric system is started, false otherwise
+   */
+  @VisibleForTesting
+  public static synchronized boolean isStarted() {
+    return sSinks != null;
+  }
+
+  /**
    * @return the number of sinks started
    */
   public static synchronized int getNumSinks() {
@@ -270,6 +281,16 @@ public final class MetricsSystem {
       sz = sSinks.size();
     }
     return sz;
+  }
+
+  /**
+   * Get metrics name based on class.
+   *
+   * @param obj object for the resource pool
+   * @return metrics string
+   */
+  public static String getResourcePoolMetricName(Object obj) {
+    return MetricsSystem.getMetricName("ResourcePool." + obj.getClass().getSimpleName());
   }
 
   /**
@@ -295,6 +316,8 @@ public final class MetricsSystem {
         return getJobMasterMetricName(name);
       case JOB_WORKER:
         return getJobWorkerMetricName(name);
+      case PLUGIN:
+        return getPluginMetricName(name);
       default:
         throw new IllegalStateException("Unknown process type");
     }
@@ -392,6 +415,20 @@ public final class MetricsSystem {
   }
 
   /**
+   * Builds metric registry name for plugin instance. The pattern is
+   * instance.uniqueId.metricName.
+   *
+   * @param name the metric name
+   * @return the metric registry name
+   */
+  public static String getPluginMetricName(String name) {
+    if (name.startsWith(InstanceType.PLUGIN.toString())) {
+      return name;
+    }
+    return Joiner.on(".").join(InstanceType.PLUGIN, name);
+  }
+
+  /**
    * Builds unique metric registry names with unique ID (set to host name). The pattern is
    * instance.metricName.hostname
    *
@@ -469,6 +506,19 @@ public final class MetricsSystem {
   }
 
   // Some helper functions.
+  /** Add or replace the instrumented executor service metrics for
+   * the given name and executor service.
+   *
+   * @param delegate the executor service delegate that will be instrumented with metrics
+   * @param name the name of the metric
+   * @return the instrumented executor service
+   */
+  public static InstrumentedExecutorService executorService(ExecutorService delegate, String name) {
+    InstrumentedExecutorService service = new InstrumentedExecutorService(
+        delegate, METRIC_REGISTRY, getMetricName(name));
+    EXECUTOR_SERVICES.put(name, service);
+    return service;
+  }
 
   /**
    * Get or add counter with the given name.
@@ -568,14 +618,67 @@ public final class MetricsSystem {
    * @param <T> the type
    */
   public static synchronized <T> void registerCachedGaugeIfAbsent(String name, Gauge<T> metric) {
+    registerCachedGaugeIfAbsent(name, metric, 10, TimeUnit.MINUTES);
+  }
+
+  /**
+   * Registers a cached gauge if it has not been registered.
+   *
+   * @param name the gauge name
+   * @param metric the gauge
+   * @param timeout the cache gauge timeout
+   * @param unit the unit of timeout
+   * @param <T> the type
+   */
+  public static synchronized <T> void registerCachedGaugeIfAbsent(
+      String name, Gauge<T> metric, long timeout, TimeUnit unit) {
     if (!METRIC_REGISTRY.getMetrics().containsKey(name)) {
-      METRIC_REGISTRY.register(name, new CachedGauge<T>(10, TimeUnit.MINUTES) {
+      METRIC_REGISTRY.register(name, new CachedGauge<T>(timeout, unit) {
         @Override
         protected T loadValue() {
           return metric.getValue();
         }
       });
     }
+  }
+
+  /**
+   * Created a gauge that aggregates the value of existing gauges.
+   *
+   * @param name the gauge name
+   * @param metrics the set of metric values to be aggregated
+   * @param timeout the cached gauge timeout
+   * @param timeUnit the unit of timeout
+   */
+  public static synchronized void registerAggregatedCachedGaugeIfAbsent(
+      String name, Set<MetricKey> metrics, long timeout, TimeUnit timeUnit) {
+    if (METRIC_REGISTRY.getMetrics().containsKey(name)) {
+      return;
+    }
+    METRIC_REGISTRY.register(name, new CachedGauge<Double>(timeout, timeUnit) {
+      @Override
+      protected Double loadValue() {
+        double total = 0.0;
+        for (MetricKey key : metrics) {
+          Metric m = getMetricValue(key.getName());
+          if (m == null || m.getMetricType() != MetricType.GAUGE) {
+            continue;
+          }
+          total += m.getValue();
+        }
+        return total;
+      }
+    });
+  }
+
+  /**
+   * Removes the metric with the given name.
+   *
+   * @param name the metric name
+   * @return true if the metric was removed, false otherwise
+   */
+  public static synchronized boolean removeMetrics(String name) {
+    return METRIC_REGISTRY.remove(name);
   }
 
   /**
@@ -592,9 +695,9 @@ public final class MetricsSystem {
    * The synchronized keyword is added for correctness with {@link #resetAllMetrics}
    */
   private static synchronized List<alluxio.grpc.Metric> reportMetrics(InstanceType instanceType) {
-    if (!sReported) {
+    if (!sReported.contains(instanceType)) {
       initShouldReportMetrics(instanceType);
-      sReported = true;
+      sReported.add(instanceType);
     }
     List<alluxio.grpc.Metric> rpcMetrics = new ArrayList<>(20);
     // Use the getMetrics() call instead of getGauges(),getCounters()... to avoid
@@ -659,8 +762,8 @@ public final class MetricsSystem {
   public static List<alluxio.grpc.Metric> reportWorkerMetrics() {
     long start = System.currentTimeMillis();
     List<alluxio.grpc.Metric> metricsList = reportMetrics(InstanceType.WORKER);
-    LOG.debug("Get the worker metrics list to report to leading master in {}ms",
-        System.currentTimeMillis() - start);
+    LOG.debug("Get the worker metrics list contains {} metrics to report to leading master in {}ms",
+        metricsList.size(), System.currentTimeMillis() - start);
     return metricsList;
   }
 
@@ -670,8 +773,8 @@ public final class MetricsSystem {
   public static List<alluxio.grpc.Metric> reportClientMetrics() {
     long start = System.currentTimeMillis();
     List<alluxio.grpc.Metric> metricsList = reportMetrics(InstanceType.CLIENT);
-    LOG.debug("Get the client metrics list to report to leading master in {}ms",
-        System.currentTimeMillis() - start);
+    LOG.debug("Get the client metrics list contains {} metrics to report to leading master in {}ms",
+        metricsList.size(), System.currentTimeMillis() - start);
     return metricsList;
   }
 
@@ -765,7 +868,7 @@ public final class MetricsSystem {
             entry.getKey(), metric.getClass().getName());
         continue;
       }
-      metricsMap.put(entry.getKey(), valueBuilder.build());
+      metricsMap.put(unescape(entry.getKey()), valueBuilder.build());
     }
     return metricsMap;
   }
@@ -812,6 +915,11 @@ public final class MetricsSystem {
       METRIC_REGISTRY.remove(timerName);
       METRIC_REGISTRY.timer(timerName);
     }
+
+    // Reset the InstrumentedExecutorServices last as it needs to keep the
+    // reference to the new metrics objects
+    EXECUTOR_SERVICES.values().forEach(InstrumentedExecutorService::reset);
+
     LAST_REPORTED_METRICS.clear();
     LOG.info("Reset all metrics in the metrics system in {}ms",
         System.currentTimeMillis() - startTime);
@@ -825,6 +933,7 @@ public final class MetricsSystem {
     for (String name : METRIC_REGISTRY.getNames()) {
       METRIC_REGISTRY.remove(name);
     }
+    EXECUTOR_SERVICES.clear();
   }
 
   /**
@@ -837,6 +946,34 @@ public final class MetricsSystem {
     }
     for (String gauge : METRIC_REGISTRY.getGauges().keySet()) {
       METRIC_REGISTRY.remove(gauge);
+    }
+  }
+
+  /**
+   * A timer context with multiple timers.
+   */
+  public static class MultiTimerContext implements AutoCloseable {
+    private final Timer[] mTimers;
+    private final long mStartTime;
+
+    /**
+     * @param timers timers associated with this context
+     */
+    public MultiTimerContext(Timer... timers) {
+      mTimers = timers;
+      mStartTime = System.nanoTime();
+    }
+
+    /**
+     * Updates the timer with the difference between current and start time. Call to this method
+     * will not reset the start time. Multiple calls result in multiple updates.
+     */
+    @Override
+    public void close() {
+      final long elapsed = System.nanoTime() - mStartTime;
+      for (Timer timer : mTimers) {
+        timer.update(elapsed, TimeUnit.NANOSECONDS);
+      }
     }
   }
 

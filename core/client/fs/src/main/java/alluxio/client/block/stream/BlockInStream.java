@@ -38,7 +38,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
-
+import java.util.Objects;
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
@@ -60,7 +60,7 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
 
   private final WorkerNetAddress mAddress;
   private final BlockInStreamSource mInStreamSource;
-  /** The id of the block or UFS file to which this instream provides access. */
+  /** The id of the block or UFS file to which this InStream provides access. */
   private final long mId;
   /** The size in bytes of the block. */
   private final long mLength;
@@ -94,7 +94,7 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
    * @param info the block info
    * @param dataSource the Alluxio worker which should read the data
    * @param dataSourceType the source location of the block
-   * @param options the instream options
+   * @param options the InStream options
    * @return the {@link BlockInStream} object
    */
   public static BlockInStream create(FileSystemContext context, BlockInfo info,
@@ -103,10 +103,11 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
     long blockId = info.getBlockId();
     long blockSize = info.getLength();
 
-    if (dataSourceType == BlockInStreamSource.PROCESS_LOCAL
-        && dataSource.equals(context.getNodeLocalWorker())) {
+    if (dataSourceType == BlockInStreamSource.PROCESS_LOCAL) {
       // Interaction between the current client and the worker it embedded to should
       // go through worker internal communication directly without RPC involves
+      LOG.debug("Creating worker process local input stream for block {} @ {}",
+          blockId, dataSource);
       return createProcessLocalBlockInStream(context, dataSource, blockId, blockSize, options);
     }
 
@@ -135,8 +136,11 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
     }
 
     // gRPC
-    LOG.debug("Creating gRPC input stream for block {} @ {} from client {} reading through {}",
-        blockId, dataSource, NetworkAddressUtils.getClientHostName(alluxioConf), dataSource);
+    LOG.debug("Creating gRPC input stream for block {} @ {} from client {} reading through {} ("
+        + "data locates in the local worker {}, shortCircuitEnabled {}, "
+        + "shortCircuitPreferred {}, sourceSupportDomainSocket {})",
+        blockId, dataSource, NetworkAddressUtils.getClientHostName(alluxioConf), dataSource,
+        sourceIsLocal, shortCircuit, shortCircuitPreferred, sourceSupportsDomainSocket);
     return createGrpcBlockInStream(context, dataSource, dataSourceType, blockId,
         blockSize, options);
   }
@@ -159,8 +163,9 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
     long chunkSize = conf.getBytes(
         PropertyKey.USER_LOCAL_READER_CHUNK_SIZE_BYTES);
     return new BlockInStream(new BlockWorkerDataReader.Factory(
-        context.getProcessLocalWorker(), blockId, chunkSize, options),
-        conf, address, BlockInStreamSource.PROCESS_LOCAL, blockId, length);
+        context.getProcessLocalWorker().orElseThrow(NullPointerException::new),
+        blockId, chunkSize, options),
+        address, BlockInStreamSource.PROCESS_LOCAL, blockId, length);
   }
 
   /**
@@ -181,7 +186,7 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
         PropertyKey.USER_LOCAL_READER_CHUNK_SIZE_BYTES);
     return new BlockInStream(
         new LocalFileDataReader.Factory(context, address, blockId, chunkSize, options),
-        conf, address, BlockInStreamSource.NODE_LOCAL, blockId, length);
+        address, BlockInStreamSource.NODE_LOCAL, blockId, length);
   }
 
   /**
@@ -216,12 +221,12 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
     } else {
       factory = new GrpcDataReader.Factory(context, address, builder);
     }
-    return new BlockInStream(factory, conf, address, blockSource, blockId, blockSize);
+    return new BlockInStream(factory, address, blockSource, blockId, blockSize);
   }
 
   /**
    * Creates a {@link BlockInStream} to read from a specific remote server. Should only be used
-   * in cases where the data source and method of reading is known, ie. worker - worker
+   * in cases where the data source and method of reading is known, i.e. worker - worker
    * communication.
    *
    * @param context the file system context
@@ -242,21 +247,20 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
         .setOpenUfsBlockOptions(ufsOptions).setChunkSize(chunkSize).buildPartial();
     DataReader.Factory factory = new GrpcDataReader.Factory(context, address,
         readRequest.toBuilder());
-    return new BlockInStream(factory, conf, address, blockSource, blockId, blockSize);
+    return new BlockInStream(factory, address, blockSource, blockId, blockSize);
   }
 
   /**
    * Creates an instance of {@link BlockInStream}.
    *
    * @param dataReaderFactory the data reader factory
-   * @param conf the Alluxio configuration
    * @param address the address of the gRPC data server
    * @param blockSource the source location of the block
    * @param id the ID (either block ID or UFS file ID)
    * @param length the length
    */
   @VisibleForTesting
-  protected BlockInStream(DataReader.Factory dataReaderFactory, AlluxioConfiguration conf,
+  protected BlockInStream(DataReader.Factory dataReaderFactory,
       WorkerNetAddress address, BlockInStreamSource blockSource, long id, long length) {
     mDataReaderFactory = dataReaderFactory;
     mAddress = address;
@@ -287,7 +291,7 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
 
   @Override
   public int read(byte[] b, int off, int len) throws IOException {
-    Preconditions.checkArgument(b != null, PreconditionMessage.ERR_READ_BUFFER_NULL);
+    Objects.requireNonNull(b, "Read buffer cannot be null");
     return read(ByteBuffer.wrap(b), off, len);
   }
 
@@ -307,21 +311,29 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
     if (len == 0) {
       return 0;
     }
+    if (mPos == mLength) {
+      return -1;
+    }
     readChunk();
     if (mCurrentChunk == null) {
       mEOF = true;
     }
     if (mEOF) {
       closeDataReader();
-      Preconditions
-          .checkState(mPos >= mLength, PreconditionMessage.BLOCK_LENGTH_INCONSISTENT.toString(),
-              mId, mLength, mPos);
+      Preconditions.checkState(mPos >= mLength,
+          "Block %s is expected to be %s bytes, but only %s bytes are available. "
+              + "Please ensure its metadata is consistent between Alluxio and UFS.",
+          mId, mLength, mPos);
       return -1;
     }
     int toRead = Math.min(len, mCurrentChunk.readableBytes());
     byteBuffer.position(off).limit(off + toRead);
     mCurrentChunk.readBytes(byteBuffer);
     mPos += toRead;
+    if (mPos == mLength) {
+      // a performance improvement introduced by https://github.com/Alluxio/alluxio/issues/14020
+      closeDataReader();
+    }
     return toRead;
   }
 
@@ -372,9 +384,8 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
   public void seek(long pos) throws IOException {
     checkIfClosed();
     Preconditions.checkArgument(pos >= 0, PreconditionMessage.ERR_SEEK_NEGATIVE.toString(), pos);
-    Preconditions
-        .checkArgument(pos <= mLength, PreconditionMessage.ERR_SEEK_PAST_END_OF_REGION.toString(),
-            mId);
+    Preconditions.checkArgument(pos <= mLength,
+        "Seek position past the end of the read region (block or file).", mId);
     if (pos == mPos) {
       return;
     }
@@ -456,10 +467,11 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
   }
 
   /**
-   * @return whether the reader is reading data directly from a local file
+   * @return the underlying data reader factory
    */
-  public boolean isShortCircuit() {
-    return mDataReaderFactory.isShortCircuit();
+  @VisibleForTesting
+  public DataReader.Factory getDataReaderFactory() {
+    return mDataReaderFactory;
   }
 
   /**
@@ -497,7 +509,7 @@ public class BlockInStream extends InputStream implements BoundedStream, Seekabl
    * Convenience method to ensure the stream is not closed.
    */
   private void checkIfClosed() {
-    Preconditions.checkState(!mClosed, PreconditionMessage.ERR_CLOSED_BLOCK_IN_STREAM);
+    Preconditions.checkState(!mClosed, "Cannot do operations on a closed BlockInStream");
   }
 
   /**

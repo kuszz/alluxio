@@ -18,7 +18,6 @@ import alluxio.retry.RetryPolicy;
 
 import java.net.InetSocketAddress;
 import java.util.function.Supplier;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -29,10 +28,6 @@ public abstract class AbstractMasterClient extends AbstractClient {
   /** Client for determining the master RPC address. */
   private final MasterInquireClient mMasterInquireClient;
 
-  /** Client for determining configuration RPC address,
-   * which may be different from target address. */
-  private final MasterInquireClient mConfMasterInquireClient;
-
   /**
    * Creates a new master client base.
    *
@@ -41,7 +36,6 @@ public abstract class AbstractMasterClient extends AbstractClient {
   public AbstractMasterClient(MasterClientContext clientConf) {
     super(clientConf, null);
     mMasterInquireClient = clientConf.getMasterInquireClient();
-    mConfMasterInquireClient = clientConf.getConfMasterInquireClient();
   }
 
   /**
@@ -55,7 +49,6 @@ public abstract class AbstractMasterClient extends AbstractClient {
       Supplier<RetryPolicy> retryPolicySupplier) {
     super(clientConf, address, retryPolicySupplier);
     mMasterInquireClient = clientConf.getMasterInquireClient();
-    mConfMasterInquireClient = clientConf.getConfMasterInquireClient();
   }
 
   @Override
@@ -65,6 +58,10 @@ public abstract class AbstractMasterClient extends AbstractClient {
 
   @Override
   public synchronized InetSocketAddress getConfAddress() throws UnavailableException {
-    return mConfMasterInquireClient.getPrimaryRpcAddress();
+    if (mAddress != null) {
+      return mAddress;
+    }
+
+    return mMasterInquireClient.getPrimaryRpcAddress();
   }
 }

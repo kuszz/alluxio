@@ -17,7 +17,7 @@ import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
 import alluxio.client.file.URIStatus;
 import alluxio.conf.PropertyKey;
-import alluxio.conf.ServerConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.grpc.CreateFilePOptions;
 import alluxio.grpc.WritePType;
 import alluxio.heartbeat.HeartbeatContext;
@@ -88,12 +88,12 @@ public class UfsFallbackFileOutStreamIntegrationTest extends AbstractFileOutStre
   @Test
   public void shortCircuitWrite() throws Exception {
 
-    try (Closeable c = new ConfigurationRule(new HashMap<PropertyKey, String>() {
+    try (Closeable c = new ConfigurationRule(new HashMap<PropertyKey, Object>() {
       {
-        put(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, String.valueOf(mBlockSize));
+        put(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, mBlockSize);
       }
-    }, ServerConfiguration.global()).toResource()) {
-      FileSystem fs = FileSystem.Factory.create(ServerConfiguration.global());
+    }, Configuration.modifiableGlobal()).toResource()) {
+      FileSystem fs = FileSystem.Factory.create();
       AlluxioURI filePath = new AlluxioURI(PathUtils.uniqPath());
       CreateFilePOptions op = CreateFilePOptions.newBuilder()
           .setWriteType(WritePType.ASYNC_THROUGH).setRecursive(true).build();
@@ -119,13 +119,13 @@ public class UfsFallbackFileOutStreamIntegrationTest extends AbstractFileOutStre
   @Ignore("Files may be lost due to evicting and committing before file is complete.")
   @Test
   public void grpcWrite() throws Exception {
-    try (Closeable c = new ConfigurationRule(new HashMap<PropertyKey, String>() {
+    try (Closeable c = new ConfigurationRule(new HashMap<PropertyKey, Object>() {
       {
-        put(PropertyKey.USER_FILE_BUFFER_BYTES, String.valueOf(mUserFileBufferSize));
-        put(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, String.valueOf(mBlockSize));
-        put(PropertyKey.USER_SHORT_CIRCUIT_ENABLED, "false");
+        put(PropertyKey.USER_FILE_BUFFER_BYTES, mUserFileBufferSize);
+        put(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT, mBlockSize);
+        put(PropertyKey.USER_SHORT_CIRCUIT_ENABLED, false);
       }
-    }, ServerConfiguration.global()).toResource()) {
+    }, Configuration.modifiableGlobal()).toResource()) {
       AlluxioURI filePath = new AlluxioURI(PathUtils.uniqPath());
       CreateFilePOptions op = CreateFilePOptions.newBuilder()
           .setWriteType(WritePType.ASYNC_THROUGH).setRecursive(true).build();

@@ -21,10 +21,10 @@ import alluxio.exception.status.UnavailableException;
 import alluxio.grpc.GrpcUtils;
 import alluxio.grpc.MountPOptions;
 import alluxio.master.file.meta.options.MountInfo;
-import alluxio.master.journal.checkpoint.CheckpointName;
 import alluxio.master.journal.DelegatingJournaled;
 import alluxio.master.journal.JournalContext;
 import alluxio.master.journal.Journaled;
+import alluxio.master.journal.checkpoint.CheckpointName;
 import alluxio.proto.journal.File;
 import alluxio.proto.journal.File.AddMountPointEntry;
 import alluxio.proto.journal.File.DeleteMountPointEntry;
@@ -54,7 +54,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
@@ -241,7 +240,7 @@ public final class MountTable implements DelegatingJournaled {
         // we choose a new candidate path if the previous candidatepath is a prefix
         // of the current alluxioPath and the alluxioPath is a prefix of the path
         if (!mount.equals(ROOT) && PathUtils.hasPrefix(path, mount)
-            && PathUtils.hasPrefix(mount, lastMount)) {
+            && lastMount.length() < mount.length()) {
           lastMount = mount;
         }
       }
@@ -285,6 +284,32 @@ public final class MountTable implements DelegatingJournaled {
   }
 
   /**
+   * Returns the mount points under the specified path.
+   *
+   * @param uri the Alluxio uri to check
+   * @param containsSelf if the given uri itself can be a mount point and included in the return
+   * @return the mount points found
+   */
+  public List<MountInfo> findChildrenMountPoints(AlluxioURI uri, boolean containsSelf)
+      throws InvalidPathException {
+    String path = uri.getPath();
+    List<MountInfo> childrenMountPoints = new ArrayList<>();
+
+    try (LockResource r = new LockResource(mReadLock)) {
+      for (Map.Entry<String, MountInfo> entry : mState.getMountTable().entrySet()) {
+        String mountPath = entry.getKey();
+        if (!containsSelf && mountPath.equals(path)) {
+          continue;
+        }
+        if (PathUtils.hasPrefix(mountPath, path)) {
+          childrenMountPoints.add(entry.getValue());
+        }
+      }
+    }
+    return childrenMountPoints;
+  }
+
+  /**
    * @param uri an Alluxio path URI
    * @return whether the given uri is a mount point
    */
@@ -316,19 +341,21 @@ public final class MountTable implements DelegatingJournaled {
   @Nullable
   public ReverseResolution reverseResolve(AlluxioURI ufsUri) {
     // TODO(ggezer): Consider alternative mount table representations for optimizing this method.
-    for (Map.Entry<String, MountInfo> mountInfoEntry : getMountTable().entrySet()) {
-      try {
-        if (mountInfoEntry.getValue().getUfsUri().isAncestorOf(ufsUri)) {
-          return new ReverseResolution(mountInfoEntry.getValue(),
-              reverseResolve(mountInfoEntry.getValue().getAlluxioUri(),
-                  mountInfoEntry.getValue().getUfsUri(), ufsUri));
+    try (LockResource r = new LockResource(mReadLock)) {
+      for (Map.Entry<String, MountInfo> mountInfoEntry : mState.getMountTable().entrySet()) {
+        try {
+          if (mountInfoEntry.getValue().getUfsUri().isAncestorOf(ufsUri)) {
+            return new ReverseResolution(mountInfoEntry.getValue(),
+                reverseResolve(mountInfoEntry.getValue().getAlluxioUri(),
+                    mountInfoEntry.getValue().getUfsUri(), ufsUri));
+          }
+        } catch (InvalidPathException e) {
+          // expected when ufsUri does not belong to this particular mountPoint
+          LOG.debug(Throwables.getStackTraceAsString(e));
         }
-      } catch (InvalidPathException e) {
-        // expected when ufsUri does not belong to this particular mountPoint
-        LOG.debug(Throwables.getStackTraceAsString(e));
       }
+      return null;
     }
-    return null;
   }
 
   /**

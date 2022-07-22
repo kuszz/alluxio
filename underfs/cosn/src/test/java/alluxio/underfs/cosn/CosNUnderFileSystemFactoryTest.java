@@ -11,10 +11,10 @@
 
 package alluxio.underfs.cosn;
 
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.Configuration;
 import alluxio.underfs.UnderFileSystemFactory;
 import alluxio.underfs.UnderFileSystemFactoryRegistry;
-import alluxio.ConfigurationTestUtils;
-import alluxio.conf.AlluxioConfiguration;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -29,7 +29,7 @@ public class CosNUnderFileSystemFactoryTest {
    */
   @Test
   public void factory() {
-    AlluxioConfiguration conf = ConfigurationTestUtils.defaults();
+    AlluxioConfiguration conf = Configuration.global();
     UnderFileSystemFactory factory = UnderFileSystemFactoryRegistry
                             .find("cosn://test-bucket/path", conf);
 

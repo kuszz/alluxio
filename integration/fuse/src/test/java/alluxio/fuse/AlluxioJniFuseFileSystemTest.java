@@ -15,8 +15,8 @@ import static jnr.constants.platform.OpenFlags.O_RDONLY;
 import static jnr.constants.platform.OpenFlags.O_WRONLY;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyInt;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.doNothing;
@@ -29,13 +29,14 @@ import static org.mockito.Mockito.when;
 
 import alluxio.AlluxioURI;
 import alluxio.ConfigurationRule;
-import alluxio.ConfigurationTestUtils;
 import alluxio.Constants;
 import alluxio.client.block.BlockMasterClient;
 import alluxio.client.file.FileInStream;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.URIStatus;
+import alluxio.conf.Configuration;
 import alluxio.conf.InstancedConfiguration;
 import alluxio.conf.PropertyKey;
 import alluxio.exception.FileAlreadyExistsException;
@@ -67,7 +68,6 @@ import org.powermock.modules.junit4.PowerMockRunner;
 
 import java.nio.ByteBuffer;
 import java.util.Collections;
-import java.util.List;
 
 /**
  * Isolation tests for {@link AlluxioJniFuseFileSystem}.
@@ -79,26 +79,29 @@ public class AlluxioJniFuseFileSystemTest {
 
   private static final String TEST_ROOT_PATH = "/t/root";
   private static final AlluxioURI BASE_EXPECTED_URI = new AlluxioURI(TEST_ROOT_PATH);
+  private static final String MOUNT_POINT = "/t/mountPoint";
 
   private AlluxioJniFuseFileSystem mFuseFs;
+  private FileSystemContext mFileSystemContext;
   private FileSystem mFileSystem;
   private FuseFileInfo mFileInfo;
-  private InstancedConfiguration mConf = ConfigurationTestUtils.defaults();
+  private InstancedConfiguration mConf = Configuration.copyGlobal();
 
   @Rule
   public ConfigurationRule mConfiguration =
-      new ConfigurationRule(ImmutableMap.of(PropertyKey.FUSE_CACHED_PATHS_MAX, "0",
-          PropertyKey.FUSE_USER_GROUP_TRANSLATION_ENABLED, "true"), mConf);
+      new ConfigurationRule(ImmutableMap.of(PropertyKey.FUSE_CACHED_PATHS_MAX, 0,
+          PropertyKey.FUSE_USER_GROUP_TRANSLATION_ENABLED, true,
+          PropertyKey.FUSE_MOUNT_ALLUXIO_PATH, TEST_ROOT_PATH,
+          PropertyKey.FUSE_MOUNT_POINT, MOUNT_POINT), mConf);
 
   @Before
   public void before() throws Exception {
-    final List<String> empty = Collections.emptyList();
-    FuseMountOptions opts =
-        new FuseMountOptions("/doesnt/matter", TEST_ROOT_PATH, false, empty);
-
+    AlluxioFuseFileSystemOpts fuseFsOpts = AlluxioFuseFileSystemOpts.create(mConf);
+    mFileSystemContext = mock(FileSystemContext.class);
     mFileSystem = mock(FileSystem.class);
     try {
-      mFuseFs = new AlluxioJniFuseFileSystem(mFileSystem, opts, mConf);
+      mFuseFs = new AlluxioJniFuseFileSystem(
+          mFileSystemContext, mFileSystem, fuseFsOpts);
     } catch (UnsatisfiedLinkError e) {
       // stop test and ignore if FuseFileSystem fails to create due to missing libfuse library
       Assume.assumeNoException(e);
@@ -132,7 +135,7 @@ public class AlluxioJniFuseFileSystemTest {
   @Test
   public void chownWithoutValidGid() throws Exception {
     long uid = AlluxioFuseUtils.getUid(System.getProperty("user.name"));
-    long gid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE;
+    long gid = AlluxioFuseUtils.ID_NOT_SET_VALUE;
     mFuseFs.chown("/foo/bar", uid, gid);
     String userName = System.getProperty("user.name");
     String groupName = AlluxioFuseUtils.getGroupName(userName);
@@ -141,7 +144,7 @@ public class AlluxioJniFuseFileSystemTest {
         SetAttributePOptions.newBuilder().setGroup(groupName).setOwner(userName).build();
     verify(mFileSystem).setAttribute(expectedPath, options);
 
-    gid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE_UNSIGNED;
+    gid = AlluxioFuseUtils.ID_NOT_SET_VALUE_UNSIGNED;
     mFuseFs.chown("/foo/bar", uid, gid);
     verify(mFileSystem, times(2)).setAttribute(expectedPath, options);
   }
@@ -149,7 +152,7 @@ public class AlluxioJniFuseFileSystemTest {
   @Test
   public void chownWithoutValidUid() throws Exception {
     String userName = System.getProperty("user.name");
-    long uid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE;
+    long uid = AlluxioFuseUtils.ID_NOT_SET_VALUE;
     long gid = AlluxioFuseUtils.getGid(userName);
     mFuseFs.chown("/foo/bar", uid, gid);
 
@@ -158,20 +161,20 @@ public class AlluxioJniFuseFileSystemTest {
     SetAttributePOptions options = SetAttributePOptions.newBuilder().setGroup(groupName).build();
     verify(mFileSystem).setAttribute(expectedPath, options);
 
-    uid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE_UNSIGNED;
+    uid = AlluxioFuseUtils.ID_NOT_SET_VALUE_UNSIGNED;
     mFuseFs.chown("/foo/bar", uid, gid);
     verify(mFileSystem, times(2)).setAttribute(expectedPath, options);
   }
 
   @Test
   public void chownWithoutValidUidAndGid() throws Exception {
-    long uid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE;
-    long gid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE;
+    long uid = AlluxioFuseUtils.ID_NOT_SET_VALUE;
+    long gid = AlluxioFuseUtils.ID_NOT_SET_VALUE;
     mFuseFs.chown("/foo/bar", uid, gid);
     verify(mFileSystem, never()).setAttribute(any());
 
-    uid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE_UNSIGNED;
-    gid = AlluxioJniFuseFileSystem.ID_NOT_SET_VALUE_UNSIGNED;
+    uid = AlluxioFuseUtils.ID_NOT_SET_VALUE_UNSIGNED;
+    gid = AlluxioFuseUtils.ID_NOT_SET_VALUE_UNSIGNED;
     mFuseFs.chown("/foo/bar", uid, gid);
     verify(mFileSystem, never()).setAttribute(any());
   }
@@ -215,6 +218,7 @@ public class AlluxioJniFuseFileSystemTest {
     // set up status
     FileInfo info = new FileInfo();
     info.setLength(4 * Constants.KB + 1);
+    info.setLastAccessTimeMs(1000);
     info.setLastModificationTimeMs(1000);
     String userName = System.getProperty("user.name");
     info.setOwner(userName);
@@ -231,6 +235,9 @@ public class AlluxioJniFuseFileSystemTest {
     assertEquals(0, mFuseFs.getattr("/foo", stat));
     assertEquals(status.getLength(), stat.st_size.longValue());
     assertEquals(9, stat.st_blocks.intValue());
+    assertEquals(status.getLastAccessTimeMs() / 1000, stat.st_atim.tv_sec.get());
+    assertEquals((status.getLastAccessTimeMs() % 1000) * 1000,
+            stat.st_atim.tv_nsec.longValue());
     assertEquals(status.getLastModificationTimeMs() / 1000, stat.st_ctim.tv_sec.get());
     assertEquals((status.getLastModificationTimeMs() % 1000) * 1000,
         stat.st_ctim.tv_nsec.longValue());
@@ -422,7 +429,7 @@ public class AlluxioJniFuseFileSystemTest {
     AlluxioURI oldPath = BASE_EXPECTED_URI.join("/old");
     AlluxioURI newPath = BASE_EXPECTED_URI.join("/new");
     doNothing().when(mFileSystem).rename(oldPath, newPath);
-    mFuseFs.rename("/old", "/new");
+    mFuseFs.rename("/old", "/new", AlluxioJniRenameUtils.NO_FLAGS);
     verify(mFileSystem).rename(oldPath, newPath);
   }
 
@@ -432,7 +439,8 @@ public class AlluxioJniFuseFileSystemTest {
     AlluxioURI newPath = BASE_EXPECTED_URI.join("/new");
     doThrow(new FileDoesNotExistException("File /old does not exist"))
         .when(mFileSystem).rename(oldPath, newPath);
-    assertEquals(-ErrorCodes.ENOENT(), mFuseFs.rename("/old", "/new"));
+    assertEquals(-ErrorCodes.ENOENT(), mFuseFs.rename("/old", "/new",
+        AlluxioJniRenameUtils.NO_FLAGS));
   }
 
   @Test
@@ -441,7 +449,8 @@ public class AlluxioJniFuseFileSystemTest {
     AlluxioURI newPath = BASE_EXPECTED_URI.join("/new");
     doThrow(new FileAlreadyExistsException("File /new already exists"))
         .when(mFileSystem).rename(oldPath, newPath);
-    assertEquals(-ErrorCodes.EEXIST(), mFuseFs.rename("/old", "/new"));
+    assertEquals(-ErrorCodes.EEXIST(), mFuseFs.rename("/old", "/new",
+        AlluxioJniRenameUtils.NO_FLAGS));
   }
 
   @Test
@@ -451,7 +460,7 @@ public class AlluxioJniFuseFileSystemTest {
     AlluxioURI newPath = BASE_EXPECTED_URI.join("/" + c256);
     doNothing().when(mFileSystem).rename(oldPath, newPath);
     assertEquals(-ErrorCodes.ENAMETOOLONG(),
-        mFuseFs.rename("/old", "/" + c256));
+        mFuseFs.rename("/old", "/" + c256, AlluxioJniRenameUtils.NO_FLAGS));
   }
 
   @Test
@@ -561,6 +570,6 @@ public class AlluxioJniFuseFileSystemTest {
     assertEquals(AlluxioJniFuseFileSystem.UNKNOWN_INODES, stbuf.f_files.intValue());
     assertEquals(AlluxioJniFuseFileSystem.UNKNOWN_INODES, stbuf.f_ffree.intValue());
     assertEquals(AlluxioJniFuseFileSystem.UNKNOWN_INODES, stbuf.f_favail.intValue());
-    assertEquals(AlluxioJniFuseFileSystem.MAX_NAME_LENGTH, stbuf.f_namemax.intValue());
+    assertEquals(AlluxioFuseUtils.MAX_NAME_LENGTH, stbuf.f_namemax.intValue());
   }
 }

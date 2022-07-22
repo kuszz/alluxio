@@ -14,6 +14,7 @@ package alluxio.stress;
 import com.beust.jcommander.Parameter;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -23,6 +24,7 @@ import java.util.List;
 public final class BaseParameters {
   public static final String CLUSTER_FLAG = "--cluster";
   public static final String CLUSTER_LIMIT_FLAG = "--cluster-limit";
+  public static final String CLUSTER_START_DELAY_FLAG = "--cluster-start-delay";
   public static final String DISTRIBUTED_FLAG = "--distributed";
   public static final String ID_FLAG = "--id";
   public static final String IN_PROCESS_FLAG = "--in-process";
@@ -31,9 +33,9 @@ public final class BaseParameters {
   public static final String HELP_FLAG = "--help";
   public static final String PROFILE_AGENT = "--profile-agent";
   public static final String BENCH_TIMEOUT = "--bench-timeout";
-
   public static final long UNDEFINED_START_MS = -1;
   public static final String AGENT_OUTPUT_PATH = "/tmp/stress_client.log";
+  public static final String DEFAULT_TASK_ID = "local-task-0";
 
   // Public flags
   @Parameter(names = {CLUSTER_FLAG},
@@ -46,6 +48,12 @@ public final class BaseParameters {
           + " will run on all available cluster workers. If < 0, will run on the workers from the"
           + " end of the worker list. This flag is only used if " + CLUSTER_FLAG + " is enabled.")
   public int mClusterLimit = 0;
+
+  @Parameter(names = {CLUSTER_START_DELAY_FLAG},
+      description = "The start delay for the jobs to wait before starting the benchmark, "
+          + "used to synchronize the jobs. For example, --cluster-start-delay 10000ms,"
+              + "--cluster-start-delay 15s, --cluster-start-delay 2m")
+  public String mClusterStartDelay = "10s";
 
   @Parameter(names = {JAVA_OPT_FLAG},
       description = "The java options to add to the command line to for the task. This can be "
@@ -65,7 +73,7 @@ public final class BaseParameters {
   // Hidden flags
   @Parameter(names = {ID_FLAG},
       description = "Any string to uniquely identify this invocation", hidden = true)
-  public String mId = "local-task-0";
+  public String mId = DEFAULT_TASK_ID;
 
   @Parameter(names = {DISTRIBUTED_FLAG},
       description = "If true, this is a distributed task, not a local task. This is "
@@ -86,4 +94,48 @@ public final class BaseParameters {
 
   @Parameter(names = {"-h", HELP_FLAG}, help = true)
   public boolean mHelp = false;
+
+  /**
+   * @return a list storing the strings that could be parsed into
+   * the same BaseParameter
+   */
+  public List<String> toBatchTaskArgumentString() {
+    List<String> res = new ArrayList<>(Arrays.asList(
+        CLUSTER_LIMIT_FLAG, String.valueOf(mClusterLimit),
+        CLUSTER_START_DELAY_FLAG, mClusterStartDelay,
+        BENCH_TIMEOUT, mBenchTimeout,
+        START_MS_FLAG, String.valueOf(mStartMs)));
+
+    if (!mProfileAgent.isEmpty()) {
+      res.add(PROFILE_AGENT);
+      res.add(mProfileAgent);
+    }
+
+    if (!mId.equals(DEFAULT_TASK_ID)) {
+      res.add(ID_FLAG);
+      res.add(mId);
+    }
+
+    if (!mJavaOpts.isEmpty()) {
+      for (String s : mJavaOpts) {
+        res.add(JAVA_OPT_FLAG);
+        res.add(s);
+      }
+    }
+
+    if (mCluster) {
+      res.add(CLUSTER_FLAG);
+    }
+    if (mDistributed) {
+      res.add(DISTRIBUTED_FLAG);
+    }
+    if (mInProcess) {
+      res.add(IN_PROCESS_FLAG);
+    }
+    if (mHelp) {
+      res.add(HELP_FLAG);
+    }
+
+    return res;
+  }
 }

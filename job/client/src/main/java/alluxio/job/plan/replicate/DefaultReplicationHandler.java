@@ -23,7 +23,6 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -50,34 +49,29 @@ public final class DefaultReplicationHandler implements ReplicationHandler {
     } catch (NotFoundException e) {
       // if the job status doesn't exist, assume the job has failed
       return Status.FAILED;
-    }
-  }
-
-  @Override
-  public List<Long> findJobs(String jobName, Set<Status> status) throws IOException {
-    final JobMasterClient client = mJobMasterClientPool.acquire();
-    return client.list(ListAllPOptions.newBuilder().setName(jobName)
-        .addAllStatus(status.stream().map(Status::toProto).collect(Collectors.toSet()))
-        .build());
-  }
-
-  @Override
-  public long evict(AlluxioURI uri, long blockId, int numReplicas)
-      throws AlluxioException, IOException {
-    JobMasterClient client = mJobMasterClientPool.acquire();
-    try {
-      return client.run(new EvictConfig(uri.getPath(), blockId, numReplicas));
     } finally {
       mJobMasterClientPool.release(client);
     }
   }
 
   @Override
-  public long replicate(AlluxioURI uri, long blockId, int numReplicas)
+  public List<Long> findJobs(String jobName, Set<Status> status) throws IOException {
+    final JobMasterClient client = mJobMasterClientPool.acquire();
+    try {
+      return client.list(ListAllPOptions.newBuilder().setName(jobName)
+          .addAllStatus(status.stream().map(Status::toProto).collect(Collectors.toSet()))
+          .build());
+    } finally {
+      mJobMasterClientPool.release(client);
+    }
+  }
+
+  @Override
+  public long setReplica(AlluxioURI uri, long blockId, int numReplicas)
       throws AlluxioException, IOException {
     JobMasterClient client = mJobMasterClientPool.acquire();
     try {
-      return client.run(new ReplicateConfig(uri.getPath(), blockId, numReplicas));
+      return client.run(new SetReplicaConfig(uri.getPath(), blockId, numReplicas));
     } finally {
       mJobMasterClientPool.release(client);
     }

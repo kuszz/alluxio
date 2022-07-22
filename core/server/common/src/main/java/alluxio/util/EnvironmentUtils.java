@@ -11,11 +11,11 @@
 
 package alluxio.util;
 
+import alluxio.annotation.SuppressFBWarnings;
 import alluxio.util.io.FileUtils;
 
 import com.amazonaws.util.EC2MetadataUtils;
 import com.google.common.io.CharStreams;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.RequestConfig;
@@ -25,7 +25,6 @@ import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.concurrent.ThreadSafe;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -33,6 +32,7 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.net.HttpURLConnection;
 import java.util.List;
+import javax.annotation.concurrent.ThreadSafe;
 
 /**
  * Utilities to detect environment Alluxio is running in.
@@ -86,7 +86,7 @@ public final class EnvironmentUtils {
   public static String getEC2ProductCode() {
     try {
       List<String> productCodes = EC2MetadataUtils.getProductCodes();
-      if (productCodes.size() < 1) {
+      if (productCodes == null || productCodes.size() < 1) {
         return "";
       }
       return productCodes.get(0);

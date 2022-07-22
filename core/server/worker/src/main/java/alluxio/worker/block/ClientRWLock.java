@@ -11,8 +11,8 @@
 
 package alluxio.worker.block;
 
-import alluxio.conf.ServerConfiguration;
 import alluxio.conf.PropertyKey;
+import alluxio.conf.Configuration;
 
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -32,7 +31,7 @@ import javax.annotation.concurrent.ThreadSafe;
 public final class ClientRWLock implements ReadWriteLock {
   /** Total number of permits. This value decides the max number of concurrent readers. */
   private static final int MAX_AVAILABLE =
-          ServerConfiguration.getInt(PropertyKey.WORKER_TIERED_STORE_BLOCK_LOCK_READERS);
+          Configuration.getInt(PropertyKey.WORKER_TIERED_STORE_BLOCK_LOCK_READERS);
   /**
    * Uses the unfair lock to prevent a read lock that fails to release from locking the block
    * forever and thus blocking all the subsequent write access.
@@ -40,7 +39,7 @@ public final class ClientRWLock implements ReadWriteLock {
    */
   private final Semaphore mAvailable = new Semaphore(MAX_AVAILABLE, false);
   /** Reference count. */
-  private AtomicInteger mReferences = new AtomicInteger();
+  private final AtomicInteger mReferences = new AtomicInteger();
 
   /**
    * Constructs a new {@link ClientRWLock}.
